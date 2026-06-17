@@ -59,7 +59,8 @@ cells.append(md("""# AIQuant — HFT Statistical Arbitrage
 
 # ── Step 1: Clone ─────────────────────────────────────────────────────────────
 cells.append(md("## Step 1 — Clone Repository"))
-cells.append(code("""import os, sys
+cells.append(code("""import os, sys, shutil
+from pathlib import Path
 
 # Purge any stale .pyc cache from previous runs
 os.chdir('/content')
@@ -68,7 +69,6 @@ os.chdir('/content')
 os.chdir('/content/AIQuant')
 
 # Purge pycache to avoid stale bytecode issues
-import shutil
 for p in Path('/content/AIQuant').rglob('__pycache__'):
     shutil.rmtree(p, ignore_errors=True)
 
