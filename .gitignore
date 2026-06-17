@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AIQuant specific
+.env
+!.env.example
+data/raw/*.parquet
+data/raw/*.csv
+data/processed/
+logs/
+results/*.png
+results/*.csv
