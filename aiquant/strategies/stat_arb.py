@@ -70,66 +70,63 @@ class KalmanStatArbStrategy:
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
         """
         Generate entry signals: 1=Long, -1=Short, 0=Flat.
+
+        All comparisons are performed on raw NumPy arrays to avoid
+        pandas element-wise overhead on large 1m datasets (100k+ bars).
         """
         self._check_required_columns(df)
-
         ofi_col = f'ofi_norm_{self.ofi_window}'
 
-        # Regime filter: mean-reverting only
-        regime_ok = df['hurst'] < self.hurst_max
+        # Extract to contiguous NumPy float64 arrays
+        zscore  = df['kalman_zscore'].to_numpy(dtype=np.float64)
+        hurst   = df['hurst'].to_numpy(dtype=np.float64)
+        ofi     = df[ofi_col].to_numpy(dtype=np.float64)
+        adf_p   = df['adf_pvalue'].to_numpy(dtype=np.float64)
+        vpin    = df['vpin'].to_numpy(dtype=np.float64)
 
-        # Stationarity filter
-        stationary = df['adf_pvalue'] < self.adf_pvalue_max
+        # Boolean masks — all vectorised NumPy operations
+        regime_ok   = hurst < self.hurst_max           # mean-reverting regime
+        stationary  = adf_p < self.adf_pvalue_max      # ADF stationarity confirmed
+        liquid      = vpin  < self.vpin_max            # not toxic order flow
+        base_filter = regime_ok & stationary & liquid  # combined gate
 
-        # Liquidity / toxicity filter
-        liquid = df['vpin'] < self.vpin_max
+        long_entry  = base_filter & (zscore < -self.entry_threshold) & (ofi > 0)
+        short_entry = base_filter & (zscore >  self.entry_threshold) & (ofi < 0)
 
-        # Combined filter
-        base_filter = regime_ok & stationary & liquid
-
-        # Long: price is significantly below Kalman mean, buying pressure building
-        long_entry = (
-            base_filter
-            & (df['kalman_zscore'] < -self.entry_threshold)
-            & (df[ofi_col] > 0)
-        )
-
-        # Short: price is significantly above Kalman mean, selling pressure building
-        short_entry = (
-            base_filter
-            & (df['kalman_zscore'] > self.entry_threshold)
-            & (df[ofi_col] < 0)
-        )
-
-        signals = pd.Series(0, index=df.index, name='signal')
-        signals[long_entry] = 1
-        signals[short_entry] = -1
+        # Build int8 signal array (memory-efficient for 100k+ bars)
+        signals_arr = np.zeros(len(df), dtype=np.int8)
+        signals_arr[long_entry]  =  1
+        signals_arr[short_entry] = -1
 
         logger.info(
             f"[KalmanStatArb] Signals generated: "
-            f"Long={long_entry.sum()}, Short={short_entry.sum()}, "
+            f"Long={int(np.sum(long_entry))}, Short={int(np.sum(short_entry))}, "
             f"Total bars={len(df)}"
         )
-        return signals
+        return pd.Series(signals_arr, index=df.index, name='signal')
 
     def generate_exit_signals(self, df: pd.DataFrame, entry_signals: pd.Series) -> pd.Series:
         """
         Generate exit signals based on mean reversion completion.
+        Uses np.abs for vectorised absolute value — faster than pd.Series.abs()
+        on large arrays.
         """
-        exits = pd.Series(0, index=df.index, name='exit')
-
-        # Exit when z-score crosses back through zero
-        exits[df['kalman_zscore'].abs() < self.exit_threshold] = 1
-
-        return exits
+        zscore    = df['kalman_zscore'].to_numpy(dtype=np.float64)
+        exits_arr = np.zeros(len(df), dtype=np.int8)
+        exits_arr[np.abs(zscore) < self.exit_threshold] = 1
+        return pd.Series(exits_arr, index=df.index, name='exit')
 
     def signal_summary(self, df: pd.DataFrame, signals: pd.Series) -> dict:
-        """Return a summary of signal statistics."""
+        """Return a summary of signal statistics using NumPy aggregations."""
+        sig_arr   = signals.to_numpy(dtype=np.int8)
+        hurst_arr = df['hurst'].to_numpy(dtype=np.float64)
+        vpin_arr  = df['vpin'].to_numpy(dtype=np.float64)
+        adf_arr   = df['adf_pvalue'].to_numpy(dtype=np.float64)
         return {
-            'total_long': (signals == 1).sum(),
-            'total_short': (signals == -1).sum(),
-            'signal_rate_pct': (signals != 0).mean() * 100,
-            'avg_hurst': df['hurst'].mean(),
-            'avg_vpin': df['vpin'].mean(),
-            'pct_stationary': (df['adf_pvalue'] < self.adf_pvalue_max).mean() * 100,
+            'total_long':      int(np.sum(sig_arr == 1)),
+            'total_short':     int(np.sum(sig_arr == -1)),
+            'signal_rate_pct': float(np.mean(sig_arr != 0) * 100),
+            'avg_hurst':       float(np.nanmean(hurst_arr)),
+            'avg_vpin':        float(np.nanmean(vpin_arr)),
+            'pct_stationary':  float(np.mean(adf_arr < self.adf_pvalue_max) * 100),
         }

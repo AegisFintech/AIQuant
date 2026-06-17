@@ -47,38 +47,54 @@ class MeanReversionStrategy:
         self.rsi_period = rsi_period
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
-        bb_col = 'bb_pct_20'
-        rsi_col = f'rsi_{self.rsi_period}'
+        """
+        Generate mean-reversion signals using fully vectorised NumPy operations.
+        Extracts all columns to contiguous float64 arrays before comparison
+        to avoid pandas indexing overhead on large 1m datasets.
+        """
+        bb_col     = 'bb_pct_20'
+        rsi_col    = f'rsi_{self.rsi_period}'
         zscore_col = 'zscore_returns_60'
 
         for col in [bb_col, rsi_col, 'vol_ratio', zscore_col, 'vol_regime']:
             if col not in df.columns:
                 raise ValueError(f"Missing column: {col}")
 
-        # Volatility spike filter: avoid extreme vol environments
-        vol_ok = df['vol_regime'] < self.vol_spike_max
+        # Extract to contiguous NumPy float64 arrays
+        bb_pct     = df[bb_col].to_numpy(dtype=np.float64)
+        rsi        = df[rsi_col].to_numpy(dtype=np.float64)
+        zscore     = df[zscore_col].to_numpy(dtype=np.float64)
+        vol_ratio  = df['vol_ratio'].to_numpy(dtype=np.float64)
+        vol_regime = df['vol_regime'].to_numpy(dtype=np.float64)
 
+        # Volatility spike filter — avoid extreme vol environments
+        vol_ok = vol_regime < self.vol_spike_max
+
+        # Long: price overextended below lower BB, RSI oversold, vol confirmation
         long_entry = (
             vol_ok
-            & (df[bb_col] < self.bb_pct_long)
-            & (df[rsi_col] < self.rsi_oversold)
-            & (df['vol_ratio'] > self.vol_ratio_min)
-            & (df[zscore_col] < self.zscore_long)
+            & (bb_pct   < self.bb_pct_long)
+            & (rsi      < self.rsi_oversold)
+            & (vol_ratio > self.vol_ratio_min)
+            & (zscore   < self.zscore_long)
         )
 
+        # Short: price overextended above upper BB, RSI overbought, vol confirmation
         short_entry = (
             vol_ok
-            & (df[bb_col] > self.bb_pct_short)
-            & (df[rsi_col] > self.rsi_overbought)
-            & (df['vol_ratio'] > self.vol_ratio_min)
-            & (df[zscore_col] > self.zscore_short)
+            & (bb_pct   > self.bb_pct_short)
+            & (rsi      > self.rsi_overbought)
+            & (vol_ratio > self.vol_ratio_min)
+            & (zscore   > self.zscore_short)
         )
 
-        signals = pd.Series(0, index=df.index, name='signal')
-        signals[long_entry] = 1
-        signals[short_entry] = -1
+        # Build int8 signal array
+        signals_arr = np.zeros(len(df), dtype=np.int8)
+        signals_arr[long_entry]  =  1
+        signals_arr[short_entry] = -1
 
         logger.info(
-            f"[MeanReversion] Long={long_entry.sum()}, Short={short_entry.sum()}"
+            f"[MeanReversion] Long={int(np.sum(long_entry))}, "
+            f"Short={int(np.sum(short_entry))}, Total bars={len(df)}"
         )
-        return signals
+        return pd.Series(signals_arr, index=df.index, name='signal')

@@ -85,42 +85,54 @@ class StrategyEnsemble:
         else:
             result['ml'] = 0
 
-        # Weighted score
-        result['score'] = (
-            result['statarb'] * self.statarb_weight
-            + result['mr'] * self.mr_weight
-            + result['trend'] * self.trend_weight
-            + result['ml'] * self.ml_weight
-        )
+        # --- Weighted score (NumPy vectorised) ----------------------------
+        # Extract signal columns to float64 arrays for fast dot-product scoring
+        sa  = result['statarb'].to_numpy(dtype=np.float64)
+        mr  = result['mr'].to_numpy(dtype=np.float64)
+        tr  = result['trend'].to_numpy(dtype=np.float64)
+        ml  = result['ml'].to_numpy(dtype=np.float64)
 
-        # Regime-adaptive routing
+        # Default weighted score
+        score = (
+            sa * self.statarb_weight
+            + mr * self.mr_weight
+            + tr * self.trend_weight
+            + ml * self.ml_weight
+        )  # shape: (n,) float64
+
+        # --- Regime-adaptive routing (NumPy in-place assignment) -----------
         if 'hurst' in df.columns:
-            hurst = df['hurst'].fillna(0.5)
-            # Mean-reverting regime: boost StatArb + MR
-            mr_regime = hurst < 0.45
-            trend_regime = hurst > 0.55
+            hurst = df['hurst'].to_numpy(dtype=np.float64)
+            hurst = np.where(np.isnan(hurst), 0.5, hurst)  # fill NaN with 0.5
 
-            result.loc[mr_regime, 'score'] = (
-                result.loc[mr_regime, 'statarb'] * 0.60
-                + result.loc[mr_regime, 'mr'] * 0.30
-                + result.loc[mr_regime, 'ml'] * 0.10
+            mr_regime    = hurst < 0.45   # mean-reverting
+            trend_regime = hurst > 0.55   # trending
+
+            # Boost StatArb + MR weights in mean-reverting regime
+            score = np.where(
+                mr_regime,
+                sa * 0.60 + mr * 0.30 + ml * 0.10,
+                score
             )
-            result.loc[trend_regime, 'score'] = (
-                result.loc[trend_regime, 'trend'] * 0.60
-                + result.loc[trend_regime, 'ml'] * 0.25
-                + result.loc[trend_regime, 'mr'] * 0.15
+            # Boost Trend + ML weights in trending regime
+            score = np.where(
+                trend_regime,
+                tr * 0.60 + ml * 0.25 + mr * 0.15,
+                score
             )
 
-        # Final signal: threshold on weighted score
-        result['final_signal'] = 0
-        result.loc[result['score'] >= 0.25, 'final_signal'] = 1
-        result.loc[result['score'] <= -0.25, 'final_signal'] = -1
+        result['score'] = score
 
-        long_count = (result['final_signal'] == 1).sum()
-        short_count = (result['final_signal'] == -1).sum()
+        # --- Final signal: threshold on weighted score (NumPy) -------------
+        final_arr = np.zeros(len(df), dtype=np.int8)
+        final_arr[score >=  0.25] =  1
+        final_arr[score <= -0.25] = -1
+        result['final_signal'] = final_arr
+
         logger.info(
-            f"[Ensemble] Final signals — Long: {long_count}, Short: {short_count}, "
+            f"[Ensemble] Final signals — "
+            f"Long: {int(np.sum(final_arr == 1))}, "
+            f"Short: {int(np.sum(final_arr == -1))}, "
             f"Total bars: {len(df)}"
         )
-
         return result

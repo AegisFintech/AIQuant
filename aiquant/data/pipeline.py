@@ -105,6 +105,22 @@ class DataPipeline:
             df_1m = df_1m.join(df_cg_resampled, how='left')
             logger.info(f"Merged CoinGecko market data")
 
+        # ---- Post-merge: enforce float64 and report NaN coverage ----
+        # Convert all numeric columns to float64 in one pass using NumPy.
+        # This avoids pandas per-column dtype promotion and ensures downstream
+        # NumPy operations receive contiguous float64 arrays.
+        numeric_cols = df_1m.select_dtypes(include=[np.number]).columns.tolist()
+        if numeric_cols:
+            df_1m[numeric_cols] = df_1m[numeric_cols].astype(np.float64)
+
+        # Report NaN coverage per column using NumPy for speed
+        nan_counts = np.sum(np.isnan(df_1m[numeric_cols].to_numpy()), axis=0)
+        high_nan_cols = [
+            f"{col}({int(n)})" for col, n in zip(numeric_cols, nan_counts) if n > 0
+        ]
+        if high_nan_cols:
+            logger.info(f"NaN counts — {', '.join(high_nan_cols[:10])}{'...' if len(high_nan_cols) > 10 else ''}")
+
         # ---- Save merged dataset ----
         safe_symbol = symbol.replace('/', '_')
         out_path = self.processed_dir / f"{safe_symbol}_1m_merged.parquet"

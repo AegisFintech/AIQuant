@@ -135,7 +135,9 @@ class LiveTradingOrchestrator:
         # 3. Generate signals
         try:
             signals_df = self.strategy.generate_signals(df_feat)
-            signal = int(signals_df['final_signal'].iloc[-1])
+            # Use NumPy to extract the last signal value — avoids pandas iloc overhead
+            final_signals_arr = signals_df['final_signal'].to_numpy(dtype=np.int8)
+            signal = int(final_signals_arr[-1])
         except Exception as e:
             logger.error(f"Signal generation failed: {e}")
             signal = 0
@@ -147,9 +149,14 @@ class LiveTradingOrchestrator:
         portfolio_value = account.get('account_value', self.initial_capital)
         self.risk.update(portfolio_value)
 
-        price = df['close'].iloc[-1]
-        current_vol = df_feat['realvol_20'].iloc[-1] if 'realvol_20' in df_feat.columns else None
-        baseline_vol = df_feat['realvol_240'].iloc[-1] if 'realvol_240' in df_feat.columns else None
+        # Use NumPy for price and volatility extraction from tail of arrays
+        close_arr = df['close'].to_numpy(dtype=np.float64)
+        price = float(close_arr[-1])
+
+        # Rolling volatility: annualised std of log returns over last 20 / 240 bars
+        log_returns = np.diff(np.log(close_arr))  # shape (n-1,)
+        current_vol  = float(np.std(log_returns[-20:])  * np.sqrt(1440)) if len(log_returns) >= 20  else None
+        baseline_vol = float(np.std(log_returns[-240:]) * np.sqrt(1440)) if len(log_returns) >= 240 else None
 
         trade_log_df = self.trader.get_trade_log_df()
         sizing = self.risk.get_position_size(

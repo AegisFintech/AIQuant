@@ -145,18 +145,38 @@ class BTCDataFetcher:
         Returns bids/asks with depth levels.
         """
         ob = self.exchange.fetch_order_book(symbol, depth)
-        bids = pd.DataFrame(ob['bids'], columns=['price', 'size'])
-        asks = pd.DataFrame(ob['asks'], columns=['price', 'size'])
+
+        # Convert directly to NumPy arrays — avoids DataFrame overhead for
+        # scalar aggregations (sum, mean) on small order book snapshots
+        bids_arr = np.array(ob['bids'], dtype=np.float64)  # shape (depth, 2): [price, size]
+        asks_arr = np.array(ob['asks'], dtype=np.float64)
+
+        bid_prices, bid_sizes = bids_arr[:, 0], bids_arr[:, 1]
+        ask_prices, ask_sizes = asks_arr[:, 0], asks_arr[:, 1]
+
+        bid_depth   = np.sum(bid_sizes)
+        ask_depth   = np.sum(ask_sizes)
+        total_depth = bid_depth + ask_depth
+        imbalance   = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+
+        # Weighted mid price (volume-weighted best bid/ask)
+        mid_price = (bid_prices[0] + ask_prices[0]) / 2.0
+        spread    = ask_prices[0] - bid_prices[0]
+
+        # Keep DataFrames for downstream use but build from arrays
+        bids = pd.DataFrame({'price': bid_prices, 'size': bid_sizes})
+        asks = pd.DataFrame({'price': ask_prices, 'size': ask_sizes})
+
         ts = pd.Timestamp.utcnow()
         return {
-            'timestamp': ts,
-            'bids': bids,
-            'asks': asks,
-            'mid_price': (bids['price'].iloc[0] + asks['price'].iloc[0]) / 2,
-            'spread': asks['price'].iloc[0] - bids['price'].iloc[0],
-            'bid_depth': bids['size'].sum(),
-            'ask_depth': asks['size'].sum(),
-            'imbalance': (bids['size'].sum() - asks['size'].sum()) / (bids['size'].sum() + asks['size'].sum()),
+            'timestamp':  ts,
+            'bids':       bids,
+            'asks':       asks,
+            'mid_price':  float(mid_price),
+            'spread':     float(spread),
+            'bid_depth':  float(bid_depth),
+            'ask_depth':  float(ask_depth),
+            'imbalance':  float(imbalance),
         }
 
     def stream_orderbook_snapshots(
@@ -271,11 +291,30 @@ class BTCDataFetcher:
         return None
 
     def _ohlcv_to_df(self, raw: List) -> pd.DataFrame:
-        df = pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        df.set_index('timestamp', inplace=True)
+        """
+        Convert raw CCXT OHLCV list to a typed DataFrame.
+
+        Uses np.array for the numeric columns so pandas receives a pre-typed
+        float64 block — avoids per-column dtype inference overhead on large
+        batches (100k+ bars).
+        """
+        if not raw:
+            return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+
+        arr = np.array(raw, dtype=np.float64)          # shape (n, 6)
+        timestamps = pd.to_datetime(arr[:, 0].astype(np.int64), unit='ms', utc=True)
+        df = pd.DataFrame(
+            {
+                'open':   arr[:, 1],
+                'high':   arr[:, 2],
+                'low':    arr[:, 3],
+                'close':  arr[:, 4],
+                'volume': arr[:, 5],
+            },
+            index=timestamps,
+        )
+        df.index.name = 'timestamp'
         df = df[~df.index.duplicated(keep='first')].sort_index()
-        df = df.astype(float)
         return df
 
     def _ohlcv_path(self, symbol: str, timeframe: str) -> Path:

@@ -44,6 +44,12 @@ class TrendFollowingStrategy:
         self.macd_slow = macd_slow
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Generate trend-following signals using fully vectorised NumPy operations.
+
+        Crossover detection uses np.diff on boolean arrays (O(n) single pass)
+        instead of pandas .shift() which allocates a new Series.
+        """
         fast_col = f'ema_{self.fast_ema}'
         slow_col = f'ema_{self.slow_ema}'
         macd_col = f'macd_diff_{self.macd_fast}_{self.macd_slow}'
@@ -52,39 +58,46 @@ class TrendFollowingStrategy:
             if col not in df.columns:
                 raise ValueError(f"Missing column: {col}")
 
-        # Trend regime filter
-        trending = df['hurst'] > self.hurst_min
+        # Extract to contiguous NumPy float64 arrays
+        ema_fast  = df[fast_col].to_numpy(dtype=np.float64)
+        ema_slow  = df[slow_col].to_numpy(dtype=np.float64)
+        adx       = df['adx'].to_numpy(dtype=np.float64)
+        hurst     = df['hurst'].to_numpy(dtype=np.float64)
+        vol_ratio = df['vol_ratio'].to_numpy(dtype=np.float64)
 
-        # ADX filter: strong trend
-        strong_trend = df['adx'] > self.adx_threshold
+        # Regime, strength, and volume filters
+        trending     = hurst     > self.hurst_min
+        strong_trend = adx       > self.adx_threshold
+        vol_ok       = vol_ratio > self.vol_ratio_min
 
-        # Volume confirmation
-        vol_ok = df['vol_ratio'] > self.vol_ratio_min
+        # EMA crossover state (bool arrays)
+        ema_bull = ema_fast > ema_slow   # fast above slow = bullish
+        ema_bear = ema_fast < ema_slow   # fast below slow = bearish
 
-        # EMA crossover
-        ema_bull = df[fast_col] > df[slow_col]
-        ema_bear = df[fast_col] < df[slow_col]
-
-        # MACD confirmation (if available)
+        # MACD confirmation
         if macd_col in df.columns:
-            macd_bull = df[macd_col] > 0
-            macd_bear = df[macd_col] < 0
+            macd = df[macd_col].to_numpy(dtype=np.float64)
+            macd_bull = macd > 0
+            macd_bear = macd < 0
         else:
-            macd_bull = pd.Series(True, index=df.index)
-            macd_bear = pd.Series(True, index=df.index)
+            macd_bull = np.ones(len(df), dtype=bool)
+            macd_bear = np.ones(len(df), dtype=bool)
 
-        long_entry = trending & strong_trend & vol_ok & ema_bull & macd_bull
-        short_entry = trending & strong_trend & vol_ok & ema_bear & macd_bear
+        long_state  = trending & strong_trend & vol_ok & ema_bull & macd_bull
+        short_state = trending & strong_trend & vol_ok & ema_bear & macd_bear
 
-        # Only signal on crossover (transition), not persistent state
-        long_cross = long_entry & ~long_entry.shift(1).fillna(False)
-        short_cross = short_entry & ~short_entry.shift(1).fillna(False)
+        # Crossover detection via np.diff (transition 0->1 only, not persistent state)
+        # np.diff returns array of length n-1; prepend False to preserve alignment
+        long_cross  = np.concatenate([[False], np.diff(long_state.astype(np.int8))  > 0])
+        short_cross = np.concatenate([[False], np.diff(short_state.astype(np.int8)) > 0])
 
-        signals = pd.Series(0, index=df.index, name='signal')
-        signals[long_cross] = 1
-        signals[short_cross] = -1
+        # Build int8 signal array
+        signals_arr = np.zeros(len(df), dtype=np.int8)
+        signals_arr[long_cross]  =  1
+        signals_arr[short_cross] = -1
 
         logger.info(
-            f"[TrendFollowing] Long crossovers={long_cross.sum()}, Short crossovers={short_cross.sum()}"
+            f"[TrendFollowing] Long crossovers={int(np.sum(long_cross))}, "
+            f"Short crossovers={int(np.sum(short_cross))}, Total bars={len(df)}"
         )
-        return signals
+        return pd.Series(signals_arr, index=df.index, name='signal')
