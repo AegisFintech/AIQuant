@@ -50,6 +50,10 @@ class TrendFollowingStrategy:
         Crossover detection uses np.diff on boolean arrays (O(n) single pass)
         instead of pandas .shift() which allocates a new Series.
         """
+        # Guard: empty DataFrame returns flat signal
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
+
         fast_col = f'ema_{self.fast_ema}'
         slow_col = f'ema_{self.slow_ema}'
         macd_col = f'macd_diff_{self.macd_fast}_{self.macd_slow}'

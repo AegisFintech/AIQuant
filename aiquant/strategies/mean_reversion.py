@@ -52,6 +52,9 @@ class MeanReversionStrategy:
         Extracts all columns to contiguous float64 arrays before comparison
         to avoid pandas indexing overhead on large 1m datasets.
         """
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
+
         bb_col     = 'bb_pct_20'
         rsi_col    = f'rsi_{self.rsi_period}'
         zscore_col = 'zscore_returns_60'

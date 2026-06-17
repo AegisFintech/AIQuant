@@ -59,6 +59,11 @@ class StrategyEnsemble:
         Generate weighted ensemble signals.
         Returns a DataFrame with individual and combined signals.
         """
+        if len(df) == 0:
+            empty = pd.DataFrame(index=df.index)
+            empty['final_signal'] = pd.Series(np.zeros(0, dtype=np.int8), index=df.index)
+            return empty
+
         result = pd.DataFrame(index=df.index)
 
         # Generate individual signals (with fallback on missing features)

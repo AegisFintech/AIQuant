@@ -61,6 +61,9 @@ class VWAPReversionStrategy:
         self.lookback        = lookback
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
+
         required = ['close', 'vwap', 'rsi_14', 'vol_regime']
         for col in required:
             if col not in df.columns:

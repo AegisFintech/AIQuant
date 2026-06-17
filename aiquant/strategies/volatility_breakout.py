@@ -53,6 +53,9 @@ class VolatilityBreakoutStrategy:
         self.atr_stop_mult = atr_stop_mult
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
+
         # Determine BB columns
         bb_upper_col = self.bb_col.replace('width', 'high').replace('bb_width_', 'bb_high_')
         bb_lower_col = self.bb_col.replace('width', 'low').replace('bb_width_', 'bb_low_')

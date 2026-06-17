@@ -74,6 +74,8 @@ class KalmanStatArbStrategy:
         All comparisons are performed on raw NumPy arrays to avoid
         pandas element-wise overhead on large 1m datasets (100k+ bars).
         """
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
         self._check_required_columns(df)
         ofi_col = f'ofi_norm_{self.ofi_window}'
 

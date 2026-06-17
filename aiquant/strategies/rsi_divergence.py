@@ -65,6 +65,9 @@ class RSIDivergenceStrategy:
         self.mtf_confirm    = mtf_confirm
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        if len(df) == 0:
+            return pd.Series(np.zeros(0, dtype=np.int8), index=df.index, name='signal')
+
         required = ['close', 'rsi_14']
         for col in required:
             if col not in df.columns:
