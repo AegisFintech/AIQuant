@@ -1,327 +1,299 @@
 """
 aiquant/data/fetcher.py
 =======================
-Professional-grade data fetcher for BTCUSD using CCXT.
-Supports 1m OHLCV, multi-timeframe, order book snapshots, and funding rate data.
-Designed for high-RAM environments with large in-memory datasets.
+Data fetching module for AIQuant.
+
+Two data sources:
+  1. CryptoDataDownload (CDD) — historical CSV for backtesting
+     URL: https://www.cryptodatadownload.com/cdd/Binance_BTCUSDT_minute.csv
+     No API key required. Full history up to July 2022 (~177MB per pair).
+     NOTE: CDD files are static snapshots (not live-updated). The fetcher
+     loads the last N days of whatever data is available in the file.
+     Uses streaming tail-read — only downloads the required number of bars.
+
+  2. Hyperliquid Public API — live 1m candles for paper/live trading
+     Endpoint: https://api.hyperliquid.xyz/info  (type=candleSnapshot)
+     No API key required for read-only market data.
+     Returns: t, T, s, i, o, c, h, l, v, n fields.
 """
 
-import ccxt
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 import time
-import os
 import logging
+import requests
+import numpy as np
+import pandas as pd
+from io import StringIO
 from pathlib import Path
-from typing import Optional, List, Dict
+from datetime import datetime, timezone
+from typing import Optional
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
+# ── Constants ────────────────────────────────────────────────────────────────
+CDD_BASE_URL = "https://www.cryptodatadownload.com/cdd"
+HL_INFO_URL  = "https://api.hyperliquid.xyz/info"
+HL_MAX_BARS  = 5000
 
-class BTCDataFetcher:
+CDD_PAIR_MAP = {
+    "BTCUSDT": "Binance_BTCUSDT_minute.csv",
+    "ETHUSDT": "Binance_ETHUSDT_minute.csv",
+    "SOLUSDT": "Binance_SOLUSDT_minute.csv",
+    "BNBUSDT": "Binance_BNBUSDT_minute.csv",
+    "XRPUSDT": "Binance_XRPUSDT_minute.csv",
+}
+HL_COIN_MAP = {
+    "BTCUSDT": "BTC",
+    "ETHUSDT": "ETH",
+    "SOLUSDT": "SOL",
+    "BNBUSDT": "BNB",
+    "XRPUSDT": "XRP",
+}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BACKTEST DATA — CryptoDataDownload
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_cdd_backtest(
+    pair:      str  = "BTCUSDT",
+    days:      int  = 90,
+    cache_dir: Path = Path("data/raw"),
+    force:     bool = False,
+) -> pd.DataFrame:
     """
-    Multi-source BTCUSD data fetcher.
-    Primary source: Binance (via CCXT) — free, no API key required for public endpoints.
-    Handles full pagination, rate limiting, deduplication, and parquet storage.
+    Fetch historical 1m OHLCV data from CryptoDataDownload for backtesting.
+
+    CDD files are static snapshots (newest data: ~July 2022 for BTC).
+    The fetcher streams the tail of the file to get the last N days of
+    available data — no need to download the full 177MB file.
+
+    Parameters
+    ----------
+    pair      : Trading pair, e.g. 'BTCUSDT'
+    days      : Number of days of history to load (from end of available data)
+    cache_dir : Directory to cache parquet files
+    force     : Force re-download even if cache exists
+
+    Returns
+    -------
+    pd.DataFrame with columns [open, high, low, close, volume]
+    and a UTC DatetimeIndex named 'timestamp'.
     """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{pair}_1m_cdd.parquet"
 
-    TIMEFRAME_MS = {
-        '1m': 60_000,
-        '5m': 300_000,
-        '15m': 900_000,
-        '1h': 3_600_000,
-        '4h': 14_400_000,
-        '1d': 86_400_000,
-    }
+    # Use cache if it exists and is not being forced
+    if not force and cache_path.exists():
+        age_h = (time.time() - cache_path.stat().st_mtime) / 3600
+        if age_h < 24:   # CDD is static — cache for 24h
+            logger.info(f"Using cached CDD data ({cache_path.name}, {age_h:.1f}h old)")
+            df = pd.read_parquet(cache_path)
+            return df.iloc[-days * 1440:].copy()
 
-    def __init__(
-        self,
-        exchange_id: str = 'binance',
-        data_dir: str = 'data',
-        api_key: Optional[str] = None,
-        api_secret: Optional[str] = None,
-    ):
-        self.exchange_id = exchange_id
-        self.data_dir = Path(data_dir)
-        self.raw_dir = self.data_dir / 'raw'
-        self.processed_dir = self.data_dir / 'processed'
-        self.raw_dir.mkdir(parents=True, exist_ok=True)
-        self.processed_dir.mkdir(parents=True, exist_ok=True)
-
-        exchange_config: Dict = {'enableRateLimit': True, 'timeout': 30000}
-        if api_key and api_secret:
-            exchange_config['apiKey'] = api_key
-            exchange_config['secret'] = api_secret
-
-        self.exchange = getattr(ccxt, exchange_id)(exchange_config)
-        logger.info(f"Initialized {exchange_id} exchange connector")
-
-    # ------------------------------------------------------------------
-    # OHLCV
-    # ------------------------------------------------------------------
-
-    def fetch_ohlcv(
-        self,
-        symbol: str = 'BTC/USDT',
-        timeframe: str = '1m',
-        since_date: str = '2024-01-01',
-        until_date: Optional[str] = None,
-        limit: int = 1000,
-        save: bool = True,
-    ) -> pd.DataFrame:
-        """
-        Fetch full OHLCV history with automatic pagination.
-        Stores result as parquet for fast re-loading.
-        """
-        logger.info(f"Fetching {timeframe} OHLCV for {symbol} from {since_date}")
-        since_ms = self.exchange.parse8601(f"{since_date}T00:00:00Z")
-        until_ms = (
-            self.exchange.parse8601(f"{until_date}T23:59:59Z")
-            if until_date
-            else self.exchange.milliseconds()
+    filename = CDD_PAIR_MAP.get(pair.upper())
+    if not filename:
+        raise ValueError(
+            f"Pair '{pair}' not in CDD map. Available: {list(CDD_PAIR_MAP.keys())}"
         )
 
-        all_ohlcv: List = []
-        tf_ms = self.TIMEFRAME_MS.get(timeframe, 60_000)
+    url = f"{CDD_BASE_URL}/{filename}"
+    logger.info(f"Streaming CDD data from {url} (last {days} days of available data)...")
 
-        while since_ms < until_ms:
-            try:
-                batch = self.exchange.fetch_ohlcv(symbol, timeframe, since_ms, limit)
-                if not batch:
-                    break
-                all_ohlcv.extend(batch)
-                last_ts = batch[-1][0]
-                since_ms = last_ts + tf_ms
-                dt_str = datetime.utcfromtimestamp(last_ts / 1000).strftime('%Y-%m-%d %H:%M')
-                logger.info(f"  → {dt_str} | total bars: {len(all_ohlcv):,}")
-                time.sleep(self.exchange.rateLimit / 1000)
-            except ccxt.NetworkError as e:
-                logger.warning(f"Network error: {e}. Retrying in 15s...")
-                time.sleep(15)
-            except ccxt.ExchangeError as e:
-                logger.error(f"Exchange error: {e}")
+    # CDD files are sorted newest-first after a 1-line comment + header.
+    # Stream line-by-line and collect the required number of bars.
+    bars_needed = days * 1440 + 500   # +500 for feature warmup
+    raw_lines   = []
+    header_line = ""
+    skipped     = 0
+
+    with requests.get(url, stream=True, timeout=120) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if skipped == 0:
+                skipped = 1        # skip CDD comment row (https://www.CryptoDataDownload.com)
+                continue
+            if skipped == 1:
+                header_line = line  # capture column header
+                skipped = 2
+                continue
+            raw_lines.append(line)
+            if len(raw_lines) >= bars_needed:
                 break
 
-        df = self._ohlcv_to_df(all_ohlcv)
-        if save:
-            path = self._save_ohlcv(df, symbol, timeframe)
-            logger.info(f"Saved {len(df):,} bars to {path}")
-        return df
-
-    def fetch_multi_timeframe(
-        self,
-        symbol: str = 'BTC/USDT',
-        timeframes: Optional[List[str]] = None,
-        since_date: str = '2024-01-01',
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Fetch multiple timeframes simultaneously for multi-timeframe analysis.
-        Returns a dict keyed by timeframe string.
-        """
-        if timeframes is None:
-            timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
-        result = {}
-        for tf in timeframes:
-            logger.info(f"Fetching {tf} data...")
-            result[tf] = self.fetch_ohlcv(symbol=symbol, timeframe=tf, since_date=since_date)
-        return result
-
-    # ------------------------------------------------------------------
-    # Order Book Snapshots
-    # ------------------------------------------------------------------
-
-    def fetch_orderbook_snapshot(
-        self,
-        symbol: str = 'BTC/USDT',
-        depth: int = 50,
-    ) -> Dict:
-        """
-        Fetch a live order book snapshot.
-        Returns bids/asks with depth levels.
-        """
-        ob = self.exchange.fetch_order_book(symbol, depth)
-
-        # Convert directly to NumPy arrays — avoids DataFrame overhead for
-        # scalar aggregations (sum, mean) on small order book snapshots
-        bids_arr = np.array(ob['bids'], dtype=np.float64)  # shape (depth, 2): [price, size]
-        asks_arr = np.array(ob['asks'], dtype=np.float64)
-
-        bid_prices, bid_sizes = bids_arr[:, 0], bids_arr[:, 1]
-        ask_prices, ask_sizes = asks_arr[:, 0], asks_arr[:, 1]
-
-        bid_depth   = np.sum(bid_sizes)
-        ask_depth   = np.sum(ask_sizes)
-        total_depth = bid_depth + ask_depth
-        imbalance   = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
-
-        # Weighted mid price (volume-weighted best bid/ask)
-        mid_price = (bid_prices[0] + ask_prices[0]) / 2.0
-        spread    = ask_prices[0] - bid_prices[0]
-
-        # Keep DataFrames for downstream use but build from arrays
-        bids = pd.DataFrame({'price': bid_prices, 'size': bid_sizes})
-        asks = pd.DataFrame({'price': ask_prices, 'size': ask_sizes})
-
-        ts = pd.Timestamp.utcnow()
-        return {
-            'timestamp':  ts,
-            'bids':       bids,
-            'asks':       asks,
-            'mid_price':  float(mid_price),
-            'spread':     float(spread),
-            'bid_depth':  float(bid_depth),
-            'ask_depth':  float(ask_depth),
-            'imbalance':  float(imbalance),
-        }
-
-    def stream_orderbook_snapshots(
-        self,
-        symbol: str = 'BTC/USDT',
-        n_snapshots: int = 100,
-        interval_sec: float = 1.0,
-        depth: int = 20,
-    ) -> pd.DataFrame:
-        """
-        Collect N order book snapshots at a given interval.
-        Useful for building microstructure features.
-        """
-        records = []
-        logger.info(f"Collecting {n_snapshots} order book snapshots for {symbol}...")
-        for i in range(n_snapshots):
-            snap = self.fetch_orderbook_snapshot(symbol, depth)
-            records.append({
-                'timestamp': snap['timestamp'],
-                'mid_price': snap['mid_price'],
-                'spread': snap['spread'],
-                'bid_depth': snap['bid_depth'],
-                'ask_depth': snap['ask_depth'],
-                'ofi': snap['imbalance'],  # Order Flow Imbalance proxy
-            })
-            if i % 10 == 0:
-                logger.info(f"  Snapshot {i+1}/{n_snapshots} | mid={snap['mid_price']:.2f}")
-            time.sleep(interval_sec)
-        df = pd.DataFrame(records).set_index('timestamp')
-        return df
-
-    # ------------------------------------------------------------------
-    # Funding Rate & Open Interest (Binance Futures)
-    # ------------------------------------------------------------------
-
-    def fetch_funding_rates(
-        self,
-        symbol: str = 'BTC/USDT',
-        since_date: str = '2024-01-01',
-    ) -> pd.DataFrame:
-        """
-        Fetch historical funding rates from Binance perpetual futures.
-        Funding rate is a key signal for mean-reversion and sentiment.
-        """
-        logger.info(f"Fetching funding rates for {symbol}...")
-        try:
-            # Use Binance futures endpoint via CCXT
-            exchange_futures = ccxt.binanceusdm({'enableRateLimit': True})
-            since_ms = exchange_futures.parse8601(f"{since_date}T00:00:00Z")
-            all_rates = []
-            while True:
-                rates = exchange_futures.fetch_funding_rate_history(symbol, since=since_ms, limit=1000)
-                if not rates:
-                    break
-                all_rates.extend(rates)
-                last_ts = rates[-1]['timestamp']
-                if last_ts >= exchange_futures.milliseconds() - 8 * 3600_000:
-                    break
-                since_ms = last_ts + 1
-                time.sleep(exchange_futures.rateLimit / 1000)
-
-            if not all_rates:
-                logger.warning("No funding rate data returned.")
-                return pd.DataFrame()
-
-            df = pd.DataFrame([{
-                'timestamp': pd.to_datetime(r['timestamp'], unit='ms'),
-                'funding_rate': r['fundingRate'],
-            } for r in all_rates])
-            df.set_index('timestamp', inplace=True)
-            df = df[~df.index.duplicated(keep='first')]
-            logger.info(f"Fetched {len(df):,} funding rate records")
-            return df
-        except Exception as e:
-            logger.error(f"Error fetching funding rates: {e}")
-            return pd.DataFrame()
-
-    # ------------------------------------------------------------------
-    # Recent Trades (Tick Data Proxy)
-    # ------------------------------------------------------------------
-
-    def fetch_recent_trades(
-        self,
-        symbol: str = 'BTC/USDT',
-        limit: int = 1000,
-    ) -> pd.DataFrame:
-        """
-        Fetch the most recent trades for tick-level analysis.
-        """
-        trades = self.exchange.fetch_trades(symbol, limit=limit)
-        df = pd.DataFrame([{
-            'timestamp': pd.to_datetime(t['timestamp'], unit='ms'),
-            'price': t['price'],
-            'amount': t['amount'],
-            'side': t['side'],
-            'cost': t['cost'],
-        } for t in trades])
-        df.set_index('timestamp', inplace=True)
-        return df
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def load_ohlcv(self, symbol: str = 'BTC/USDT', timeframe: str = '1m') -> Optional[pd.DataFrame]:
-        """Load previously saved OHLCV data from parquet."""
-        path = self._ohlcv_path(symbol, timeframe)
-        if path.exists():
-            logger.info(f"Loading cached data from {path}")
-            return pd.read_parquet(path)
-        logger.warning(f"No cached data found at {path}")
-        return None
-
-    def _ohlcv_to_df(self, raw: List) -> pd.DataFrame:
-        """
-        Convert raw CCXT OHLCV list to a typed DataFrame.
-
-        Uses np.array for the numeric columns so pandas receives a pre-typed
-        float64 block — avoids per-column dtype inference overhead on large
-        batches (100k+ bars).
-        """
-        if not raw:
-            return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
-
-        arr = np.array(raw, dtype=np.float64)          # shape (n, 6)
-        timestamps = pd.to_datetime(arr[:, 0].astype(np.int64), unit='ms', utc=True)
-        df = pd.DataFrame(
-            {
-                'open':   arr[:, 1],
-                'high':   arr[:, 2],
-                'low':    arr[:, 3],
-                'close':  arr[:, 4],
-                'volume': arr[:, 5],
-            },
-            index=timestamps,
+    if not raw_lines:
+        raise ValueError(
+            f"No data received from CryptoDataDownload for {pair}. "
+            "Check your internet connection or try again later."
         )
-        df.index.name = 'timestamp'
-        df = df[~df.index.duplicated(keep='first')].sort_index()
-        return df
 
-    def _ohlcv_path(self, symbol: str, timeframe: str) -> Path:
-        safe = symbol.replace('/', '_')
-        return self.raw_dir / f"{safe}_{timeframe}.parquet"
+    # Parse collected lines into a DataFrame
+    csv_text = header_line + "\n" + "\n".join(raw_lines)
+    df_raw   = pd.read_csv(StringIO(csv_text))
 
-    def _save_ohlcv(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Path:
-        path = self._ohlcv_path(symbol, timeframe)
-        df.to_parquet(path, compression='snappy')
-        return path
+    # Normalise column names
+    # CDD columns: unix, date, symbol, open, high, low, close, Volume BTC, Volume USDT, tradecount
+    col_map = {}
+    for c in df_raw.columns:
+        cl = c.lower().strip()
+        if cl in ("unix", "timestamp"):
+            col_map[c] = "unix"
+        elif cl == "date":
+            col_map[c] = "date"
+        elif cl == "open":
+            col_map[c] = "open"
+        elif cl == "high":
+            col_map[c] = "high"
+        elif cl == "low":
+            col_map[c] = "low"
+        elif cl == "close":
+            col_map[c] = "close"
+        elif "volume" in cl and "usdt" not in cl:
+            col_map[c] = "volume"
+    df_raw = df_raw.rename(columns=col_map)
+
+    # Build typed NumPy arrays
+    open_arr  = df_raw["open"].to_numpy(dtype=np.float64)
+    high_arr  = df_raw["high"].to_numpy(dtype=np.float64)
+    low_arr   = df_raw["low"].to_numpy(dtype=np.float64)
+    close_arr = df_raw["close"].to_numpy(dtype=np.float64)
+    vol_arr   = df_raw["volume"].to_numpy(dtype=np.float64)
+
+    if "unix" in df_raw.columns:
+        ts_arr = df_raw["unix"].to_numpy(dtype=np.int64)
+        index  = pd.to_datetime(ts_arr, unit="ms", utc=True)
+    else:
+        index  = pd.to_datetime(df_raw["date"], utc=True)
+
+    df = pd.DataFrame({
+        "open":   open_arr,
+        "high":   high_arr,
+        "low":    low_arr,
+        "close":  close_arr,
+        "volume": vol_arr,
+    }, index=index)
+    df.index.name = "timestamp"
+
+    # CDD is newest-first — sort to chronological
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="first")]
+
+    # Cache full available dataset to parquet
+    df.to_parquet(cache_path, compression="snappy")
+    logger.info(f"CDD data cached: {len(df):,} bars → {cache_path}")
+
+    # Return last N days of available data
+    return df.iloc[-days * 1440:].copy()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# LIVE DATA — Hyperliquid Public API
+# ════════════════════════════════════════════════════════════════════════════
+
+def fetch_hyperliquid_candles(
+    pair:     str = "BTCUSDT",
+    n_bars:   int = 500,
+    interval: str = "1m",
+) -> pd.DataFrame:
+    """
+    Fetch recent candles from Hyperliquid's public API.
+    No API key required.
+
+    Parameters
+    ----------
+    pair     : Trading pair, e.g. 'BTCUSDT'
+    n_bars   : Number of recent bars to fetch (max 5000)
+    interval : Candle interval ('1m', '5m', '15m', '1h', '4h', '1d')
+
+    Returns
+    -------
+    pd.DataFrame with columns [open, high, low, close, volume]
+    and a UTC DatetimeIndex named 'timestamp'.
+    """
+    coin   = HL_COIN_MAP.get(pair.upper(), pair.replace("USDT", ""))
+    n_bars = min(n_bars, HL_MAX_BARS)
+
+    interval_ms = _interval_to_ms(interval)
+    end_ms      = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms    = end_ms - (n_bars * interval_ms)
+
+    all_bars = []
+    since_ms = start_ms
+
+    while since_ms < end_ms:
+        batch_end = min(since_ms + HL_MAX_BARS * interval_ms, end_ms)
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin":      coin,
+                "interval":  interval,
+                "startTime": since_ms,
+                "endTime":   batch_end,
+            }
+        }
+        resp = requests.post(HL_INFO_URL, json=payload, timeout=15)
+        resp.raise_for_status()
+        bars = resp.json()
+
+        if not bars or not isinstance(bars, list):
+            break
+
+        all_bars.extend(bars)
+        since_ms = bars[-1]["T"] + 1
+        if len(bars) < 10:
+            break
+
+    if not all_bars:
+        raise ValueError(
+            f"No candle data returned from Hyperliquid for {coin}. "
+            "Check pair name and network connectivity."
+        )
+
+    ts_arr    = np.array([b["t"] for b in all_bars], dtype=np.int64)
+    open_arr  = np.array([b["o"] for b in all_bars], dtype=np.float64)
+    high_arr  = np.array([b["h"] for b in all_bars], dtype=np.float64)
+    low_arr   = np.array([b["l"] for b in all_bars], dtype=np.float64)
+    close_arr = np.array([b["c"] for b in all_bars], dtype=np.float64)
+    vol_arr   = np.array([b["v"] for b in all_bars], dtype=np.float64)
+
+    index = pd.to_datetime(ts_arr, unit="ms", utc=True)
+    df = pd.DataFrame({
+        "open":   open_arr,
+        "high":   high_arr,
+        "low":    low_arr,
+        "close":  close_arr,
+        "volume": vol_arr,
+    }, index=index)
+    df.index.name = "timestamp"
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="first")]
+    return df
+
+
+def fetch_latest_bar(pair: str = "BTCUSDT") -> Optional[pd.Series]:
+    """Fetch the single most recent completed 1m bar from Hyperliquid."""
+    try:
+        df = fetch_hyperliquid_candles(pair=pair, n_bars=2, interval="1m")
+        if len(df) >= 1:
+            return df.iloc[-1]
+    except Exception as e:
+        logger.warning(f"fetch_latest_bar failed: {e}")
+    return None
+
+
+def get_available_pairs() -> list:
+    """Return list of supported trading pairs."""
+    return list(CDD_PAIR_MAP.keys())
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _interval_to_ms(interval: str) -> int:
+    """Convert interval string to milliseconds."""
+    return {
+        "1m": 60_000, "3m": 180_000, "5m": 300_000,
+        "15m": 900_000, "30m": 1_800_000,
+        "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+    }.get(interval, 60_000)

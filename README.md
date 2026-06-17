@@ -1,249 +1,278 @@
 # AIQuant
 
-**HFT Statistical Arbitrage Framework for BTCUSD**
+**HFT Statistical Arbitrage Framework for BTCUSD and major crypto pairs.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
-[![Pair](https://img.shields.io/badge/default%20pair-BTCUSDT-orange)](https://www.binance.com)
-[![Data](https://img.shields.io/badge/data-Binance%20Public%20API-green)](https://api.binance.com)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://python.org)
+[![Data](https://img.shields.io/badge/Backtest_Data-CryptoDataDownload-green)](https://www.cryptodatadownload.com)
+[![Execution](https://img.shields.io/badge/Live_Trading-Hyperliquid-purple)](https://hyperliquid.xyz)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AegisFintech/AIQuant/blob/main/AIQuant_Colab.ipynb)
 
-A professional-grade quantitative trading system built for high-RAM machines. Designed around a **Kalman Filter Statistical Arbitrage** primary strategy with trend-following, mean-reversion, and ML ensemble backups. Includes a full Backtrader backtesting engine, a self-contained paper trading simulator, and Kelly Criterion position sizing — all runnable from a single command with zero account registration required.
+Built by [AegisFintech](https://github.com/AegisFintech) · Apache 2.0 License
+
+---
+
+## Overview
+
+AIQuant is a professional-grade quantitative trading system built around **Kalman Filter Statistical Arbitrage** as the primary strategy, with Mean Reversion, Trend Following, and an ML Ensemble (XGBoost + LightGBM) as backups. It uses **Kelly Criterion** position sizing, a **Backtrader** backtesting engine, and **Hyperliquid** for live execution.
+
+| Mode | Data Source | Purpose |
+|---|---|---|
+| `backtest` | [CryptoDataDownload](https://www.cryptodatadownload.com/) | Historical 1m OHLCV, full history since 2017, no API key needed |
+| `live` | Hyperliquid public API + mainnet | Live 1m candles + real execution, requires private key in `.env` |
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone
+# 1. Clone and install
 git clone https://github.com/AegisFintech/AIQuant.git
 cd AIQuant
-
-# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Copy and configure environment
+# 2. Configure environment
 cp .env.example .env
-# (Optional) Edit .env to add API keys for on-chain data enrichment
+# Edit .env — only HYPERLIQUID_PRIVATE_KEY is required for live trading
 
-# 4. Run a backtest — defaults to BTC, last 90 days, no config needed
+# 3. Run a backtest (BTC, last 90 days — no API key needed)
 python3 run.py backtest
 ```
-
-That is it. No account, no API key, no registration needed for backtesting and paper trading.
 
 ---
 
 ## Commands
 
-All commands follow the pattern `python3 run.py <mode> [options]`.
+```
+python3 run.py <mode> [options]
+```
 
-| Command | Description |
-|---|---|
-| `python3 run.py backtest` | Run full backtest on BTC, last 90 days |
-| `python3 run.py paper` | Paper trade BTC (30-bar replay demo) |
-| `python3 run.py paper --bars 0` | Live paper trade (polls Binance every 60s) |
-| `python3 run.py fetch` | Pre-fetch and cache BTC data |
-| `python3 run.py serve` | Open chart viewer in browser |
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--pair` | `BTCUSDT` | Trading pair (e.g. `ETHUSDT`, `SOLUSDT`) |
-| `--days` | `90` | Days of history to use (T-90 from today) |
-| `--bars` | `30` | Bars to replay in paper trading mode (`0` = live) |
-| `--capital` | `10000` | Starting capital for paper trading |
-| `--force` | off | Force re-fetch data even if cache is fresh |
-| `--port` | `8765` | Port for the chart viewer server |
-
-### Examples
+### `backtest` — Historical Backtesting
 
 ```bash
-# BTC backtest, last 90 days (default — no flags needed)
-python3 run.py backtest
-
-# ETH backtest, last 60 days
-python3 run.py backtest --pair ETHUSDT --days 60
-
-# BTC backtest, last 30 days
-python3 run.py backtest --days 30
-
-# Paper trade BTC, replay 50 bars at 2s each
-python3 run.py paper --bars 50
-
-# Live paper trading — polls Binance every 60 seconds indefinitely
-python3 run.py paper --bars 0
-
-# Pre-fetch 180 days of BTC data (recommended for ML training)
-python3 run.py fetch --days 180
-
-# Open chart viewer in browser (for headless server users)
-python3 run.py serve
+python3 run.py backtest                        # BTC, last 90 days (default)
+python3 run.py backtest --pair ETH             # Ethereum (shorthand accepted)
+python3 run.py backtest --days 30              # shorter window
+python3 run.py backtest --pair SOL --days 60   # Solana, 60 days
+python3 run.py backtest --capital 50000        # custom starting capital
+python3 run.py backtest --force                # force re-download data
 ```
 
----
-
-## Viewing Charts
-
-The backtest chart is automatically saved to `results/backtest_results.png` after every run.
-
-| Environment | How to View |
-|---|---|
-| **Desktop (Mac / Linux / Windows)** | Chart opens automatically in your default image viewer |
-| **Headless server** | Run `python3 run.py serve` then open `http://localhost:8765/viewer.html` |
-| **Remote server** | `scp user@yourserver:~/AIQuant/results/backtest_results.png .` |
-
----
-
-## About T-90 Days
-
-The default window of **90 days = 129,600 one-minute bars**. This is more than sufficient for all strategy components:
-
-| Requirement | Bars Needed | T-90 Coverage |
+| Option | Default | Description |
 |---|---|---|
-| EMA 200 warmup | 200 bars | Yes |
-| Hurst Exponent (100-bar window) | 100 bars | Yes |
-| Kalman Filter convergence | ~500 bars | Yes |
-| Rolling Kelly (50-trade history) | ~1,000+ bars | Yes |
-| ML model training (recommended) | 30,000+ bars | Yes (129,600) |
+| `--pair` | `BTCUSDT` | Trading pair. Accepts `BTC`, `btc`, `BTCUSDT` — all normalised automatically |
+| `--days` | `90` | Days of 1m history (90 days = 129,600 bars) |
+| `--capital` | `100000` | Starting capital in USD |
+| `--force` | off | Force re-download even if cached data exists |
 
-For ML ensemble training, use `--days 180` (259,200 bars). The minimum usable window is `--days 7` for quick iteration.
+### `live` — Live Trading on Hyperliquid
 
----
-
-## Architecture
-
-```
-AIQuant/
-├── run.py                          <- Single entry point (start here)
-├── aiquant/
-│   ├── data/
-│   │   ├── fetcher.py              <- Binance 1m OHLCV, order book, funding rates
-│   │   ├── onchain.py              <- Glassnode, CoinGecko, Fear & Greed Index
-│   │   └── pipeline.py             <- Data orchestrator
-│   ├── features/
-│   │   ├── technical.py            <- EMA, RSI, MACD, Bollinger, ATR, VWAP (50+ indicators)
-│   │   ├── microstructure.py       <- OFI, VPIN, Amihud, Kyle's Lambda, Roll Spread
-│   │   └── statarb.py              <- Kalman Filter, Hurst, OU half-life, ADF, CUSUM
-│   ├── strategies/
-│   │   ├── stat_arb.py             <- Primary: Kalman StatArb (mean-reversion regime)
-│   │   ├── mean_reversion.py       <- Backup: Bollinger + RSI reversion
-│   │   ├── trend_following.py      <- Backup: EMA crossover + MACD momentum
-│   │   └── ensemble.py             <- Regime-adaptive signal combiner
-│   ├── models/
-│   │   └── ml_signal.py            <- XGBoost + LightGBM + RF ensemble (walk-forward CV)
-│   ├── backtest/
-│   │   ├── engine.py               <- Backtrader engine (1m data, realistic fees + slippage)
-│   │   └── analytics.py            <- Sharpe, Sortino, Calmar, VaR, CVaR, SQN
-│   ├── risk/
-│   │   └── position_sizing.py      <- Full Kelly, Half-Kelly, Vol-Adjusted Kelly, drawdown halts
-│   └── execution/
-│       ├── paper_trader.py         <- Self-contained paper trading (no account needed)
-│       └── live_trader.py          <- Live trading orchestrator
-├── config/
-│   └── settings.yaml               <- All strategy parameters
-├── data/raw/                       <- Cached parquet files (gitignored)
-├── results/                        <- Charts and reports
-├── logs/                           <- Trade logs and equity curves
-├── .env.example                    <- Environment variable template
-└── requirements.txt
+```bash
+python3 run.py live                            # BTC, poll every 60s
+python3 run.py live --pair ETH --poll 30       # ETH, poll every 30s
+python3 run.py live --capital 5000             # custom capital
 ```
 
----
-
-## Strategy Stack
-
-### Primary — Kalman Filter Statistical Arbitrage
-
-Exploits mean-reverting price regimes identified by a **Hurst Exponent < 0.45**. The Kalman Filter tracks a dynamic fair-value mean; trades are entered when the price deviates beyond ±2.0 standard deviations, confirmed by RSI and Order Flow Imbalance.
-
-- **Entry:** Kalman z-score > ±2.0, RSI confirmation (< 42 long / > 58 short), OFI alignment
-- **Exit:** Z-score reverts to ±0.5, stop-loss 1.2%, take-profit 2.5%, max hold 60 bars
-- **Regime filter:** Only active when Hurst < 0.45 (confirmed mean-reverting)
-
-### Backup — Trend Following
-
-Activates when Hurst > 0.55 (confirmed trending regime). Uses EMA crossover (5/20) with MACD histogram confirmation and volume surge filter (volume ratio > 1.2x average).
-
-### Backup — Mean Reversion (Bollinger)
-
-Bollinger Band %B reversion with RSI divergence. Operates in neutral regimes (0.45 <= Hurst <= 0.55).
-
-### ML Ensemble
-
-XGBoost + LightGBM + Random Forest trained on 100+ features with walk-forward cross-validation. Used as a signal quality filter on top of the rule-based strategies.
-
----
-
-## Risk Management
-
-All position sizing uses the **Kelly Criterion** with a 0.5 fraction (Half-Kelly) by default.
-
-| Control | Value |
-|---|---|
-| Kelly fraction | 0.5 (Half-Kelly) |
-| Max position size | 25% of portfolio |
-| Stop-loss | 1.2% per trade |
-| Take-profit | 2.5% per trade |
-| Max drawdown halt | 15% |
-| Daily loss limit | 5% |
-| Taker fee (simulated) | 0.035% |
-| Slippage (simulated) | 0.01% |
+| Option | Default | Description |
+|---|---|---|
+| `--pair` | `BTCUSDT` | Trading pair |
+| `--capital` | `10000` | Starting capital in USD |
+| `--poll` | `60` | Seconds between each trading loop tick |
 
 ---
 
 ## Data Sources
 
-All data sources used are **free and require no API key** for basic operation.
+### Backtest — CryptoDataDownload
 
-| Source | Data | Key Required |
-|---|---|---|
-| Binance Public API | 1m OHLCV, order book | No |
-| CoinGecko | BTC market data, dominance | No |
-| Alternative.me | Fear & Greed Index | No |
-| Glassnode | On-chain metrics (SOPR, MVRV, hash rate) | Yes (free tier) |
-| CryptoCompare | Social sentiment, news | Yes (free tier) |
+- **No API key required.** Completely free.
+- Full 1m OHLCV history from 2017 to present for BTC, ETH, SOL, BNB, XRP.
+- AIQuant uses a **streaming tail-read** — only the last N days are downloaded, not the full 177MB file. A 90-day backtest downloads ~5MB.
+- Data is cached to `data/raw/<pair>_1m_cdd.parquet` after first fetch. Subsequent runs load from cache instantly.
 
----
+### Live Trading — Hyperliquid
 
-## Configuration
+- **Market data:** Hyperliquid public `candleSnapshot` API — no auth needed, returns live 1m candles.
+- **Execution:** Hyperliquid mainnet perpetuals DEX — requires `HYPERLIQUID_PRIVATE_KEY` in `.env`.
+- Non-custodial, no KYC, 0.035% taker fee, deep liquidity.
 
-Edit `config/settings.yaml` to tune strategy parameters, or set environment variables in `.env`.
+#### Setting up Hyperliquid
 
-Key parameters to tune for improved performance:
+```bash
+# 1. Generate a wallet
+python3 -c "from eth_account import Account; a=Account.create(); print('Key:', a.key.hex(), '\nAddress:', a.address)"
 
-```yaml
-strategy:
-  stat_arb:
-    kalman_zscore_entry: 2.0     # Widen to 2.5 for fewer, higher-quality trades
-    stop_loss: 0.012             # 1.2% stop
-    take_profit: 0.025           # 2.5% target
-  regime:
-    hurst_mean_rev_threshold: 0.45
-    hurst_trend_threshold: 0.55
+# 2. Add to .env
+HYPERLIQUID_PRIVATE_KEY=<your_key_here>
 
-risk:
-  kelly_fraction: 0.5            # Half-Kelly (conservative)
-  max_drawdown: 0.15             # Halt trading at 15% drawdown
+# 3. Fund your account at https://app.hyperliquid.xyz (deposit USDC via Arbitrum)
+
+# 4. Start live trading
+python3 run.py live
 ```
 
 ---
 
-## Installation
+## Supported Pairs
 
-**Requirements:** Python 3.10+, 8 GB+ RAM recommended (16 GB+ for ML training on 180-day datasets)
+| Pair | Backtest (CDD) | Live (Hyperliquid) |
+|---|---|---|
+| `BTCUSDT` | Full history since 2017 | ✅ |
+| `ETHUSDT` | Full history since 2017 | ✅ |
+| `SOLUSDT` | Full history | ✅ |
+| `BNBUSDT` | Full history | ✅ |
+| `XRPUSDT` | Full history | ✅ |
+
+---
+
+## Strategy Architecture
+
+### Primary — Kalman Filter Statistical Arbitrage
+
+Exploits mean-reverting price regimes using a Kalman Filter dynamic mean. Only trades when the market is statistically confirmed to be mean-reverting (Hurst exponent < 0.45). Entry triggered when Kalman z-score exceeds ±1.8 standard deviations, confirmed by Order Flow Imbalance.
+
+### Backup Strategies
+
+| Strategy | Trigger | Regime |
+|---|---|---|
+| **Mean Reversion** | Bollinger Band + RSI extremes | Mean-reverting (Hurst < 0.5) |
+| **Trend Following** | EMA crossover + ADX > 25 | Trending (Hurst > 0.55) |
+| **ML Ensemble** | XGBoost + LightGBM + RF | Any regime |
+
+---
+
+## Feature Engineering (100+ features)
+
+| Category | Features |
+|---|---|
+| **Technical** | EMA, SMA, RSI, MACD, Bollinger Bands, ATR, ADX, Stochastic, Williams %R, CCI, OBV, VWAP |
+| **Microstructure** | OFI, VPIN, Amihud Illiquidity, Kyle's Lambda, Roll Spread, Corwin-Schultz spread |
+| **Statistical Arbitrage** | Kalman Filter mean/z-score, rolling Hurst Exponent, OU half-life, ADF p-value, CUSUM |
+| **Intraday Seasonality** | Cyclically encoded hour, minute, day-of-week |
+
+---
+
+## Risk Management
+
+| Parameter | Default | Description |
+|---|---|---|
+| Kelly Fraction | 0.5 (Half-Kelly) | Reduces full Kelly by 50% to account for estimation error |
+| Max Position | 25% of portfolio | Hard cap per trade |
+| Max Daily Loss | 3% | Trading halts for the day if breached |
+| Max Drawdown | 15% | System halts if portfolio drawdown exceeds this |
+
+---
+
+## Viewing Backtest Charts
+
+| Environment | How to View |
+|---|---|
+| **Desktop (Mac / Linux / Windows)** | Chart opens automatically after backtest |
+| **Headless Linux server** | Saved to `results/backtest_results.png` — `scp` it down |
+| **Google Colab** | Displayed inline in the notebook |
+
+---
+
+## About T-90 Days
+
+The default 90-day window = **129,600 one-minute bars**. Sufficient for all strategy components:
+
+| Requirement | Bars Needed | T-90 Coverage |
+|---|---|---|
+| EMA 200 warmup | 200 bars | ✅ |
+| Hurst Exponent (100-bar window) | 100 bars | ✅ |
+| Kalman Filter convergence | ~500 bars | ✅ |
+| Rolling Kelly (50-trade history) | ~1,000 bars | ✅ |
+| ML model training | 30,000+ bars | ✅ (129,600) |
+
+For ML ensemble training, use `--days 180` (259,200 bars).
+
+---
+
+## Project Structure
+
+```
+AIQuant/
+├── run.py                          <- Main CLI entry point
+├── .env.example                    <- Environment variable template
+├── requirements.txt
+├── LICENSE                         <- Apache 2.0
+├── AIQuant_Colab.ipynb             <- Google Colab notebook
+├── QUANT_RESEARCH_REPORT.md        <- Mathematical foundations
+├── aiquant/
+│   ├── data/
+│   │   ├── fetcher.py              <- CDD (backtest) + Hyperliquid (live) data
+│   │   ├── onchain.py              <- On-chain metrics (CoinGecko, Fear & Greed)
+│   │   └── pipeline.py            <- Data pipeline orchestrator
+│   ├── features/
+│   │   ├── technical.py            <- 50+ technical indicators
+│   │   ├── microstructure.py       <- Market microstructure features
+│   │   └── statarb.py              <- Statistical arbitrage features
+│   ├── strategies/
+│   │   ├── stat_arb.py             <- Primary: Kalman Filter StatArb
+│   │   ├── mean_reversion.py       <- Backup: Bollinger + RSI reversion
+│   │   ├── trend_following.py      <- Backup: EMA crossover + MACD
+│   │   └── ensemble.py             <- Regime-adaptive signal combiner
+│   ├── models/
+│   │   └── ml_signal.py            <- XGBoost + LightGBM + RF ensemble
+│   ├── backtest/
+│   │   ├── engine.py               <- Backtrader engine
+│   │   └── analytics.py            <- Sharpe, Sortino, Calmar, VaR, CVaR
+│   ├── risk/
+│   │   └── position_sizing.py      <- Kelly criterion + drawdown controls
+│   ├── execution/
+│   │   ├── hyperliquid_trader.py   <- Hyperliquid mainnet execution
+│   │   └── live_trader.py          <- Live trading orchestrator
+│   └── utils/
+│       └── fast_math.py            <- Numba JIT-compiled math functions
+├── data/raw/                       <- Cached parquet files (gitignored)
+├── results/                        <- Backtest charts
+└── logs/live_trading/              <- Trade logs (JSON)
+```
+
+---
+
+## Google Colab
+
+Run AIQuant in the cloud with zero local setup:
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AegisFintech/AIQuant/blob/main/AIQuant_Colab.ipynb)
+
+| Colab Tier | RAM | Recommended Days |
+|---|---|---|
+| Free | 12 GB | 30 days |
+| Pro | 25 GB | 90 days |
+| Pro+ | 52 GB | 180 days |
+
+---
+
+## Performance Optimisations
+
+| Technique | Where Used | Speedup |
+|---|---|---|
+| **Numba JIT** | Hurst, OU half-life, autocorrelation, Kalman filter | 100–200x vs pandas rolling.apply |
+| **NumPy vectorisation** | All signal generation and feature computation | 10–50x vs Python loops |
+| **Parquet caching** | CDD data cached after first fetch | Instant re-load |
+| **Streaming tail-read** | CDD download | Only fetches required bars, not full 177MB |
+| **int8 signal arrays** | Signal generation | 8x less RAM than int64 |
+
+---
+
+## Requirements
+
+- Python 3.9+
+- 8 GB RAM minimum (16 GB recommended for 90-day backtests)
+- Internet connection
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Core dependencies: `backtrader`, `pandas`, `numpy`, `scipy`, `scikit-learn`, `xgboost`, `lightgbm`, `matplotlib`, `requests`, `pyarrow`
-
 ---
 
 ## License
 
-Copyright 2026 AegisFintech. Licensed under the [Apache License 2.0](LICENSE).
+Apache License 2.0 — Copyright 2026 AegisFintech. See [LICENSE](LICENSE) for details.
 
 ---
 
