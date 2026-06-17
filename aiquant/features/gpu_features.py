@@ -280,7 +280,28 @@ def _build_technical_gpu(df: pd.DataFrame, cp) -> pd.DataFrame:
     feats['gap_pct']     = gap / cp.where(c == 0, 1e-10, c)
     feats['is_bullish']  = (c > o).astype(cp.int8)
     feats['is_bearish']  = (c < o).astype(cp.int8)
-
+    # ── ADX (Average Directional Index) ──────────────────────────────────
+    # True Range already computed above as `tr`
+    prev_h = cp.concatenate([cp.array([h[0]]), h[:-1]])
+    prev_l = cp.concatenate([cp.array([l[0]]), l[:-1]])
+    dm_pos = cp.where((h - prev_h) > (prev_l - l), cp.maximum(h - prev_h, 0.0), 0.0)
+    dm_neg = cp.where((prev_l - l) > (h - prev_h), cp.maximum(prev_l - l, 0.0), 0.0)
+    for period in [14, 21]:
+        atr_p  = _cp_rolling_mean(tr, period)
+        di_pos = 100.0 * _cp_rolling_mean(dm_pos, period) / cp.where(atr_p == 0, 1e-10, atr_p)
+        di_neg = 100.0 * _cp_rolling_mean(dm_neg, period) / cp.where(atr_p == 0, 1e-10, atr_p)
+        di_sum = di_pos + di_neg
+        dx     = 100.0 * cp.abs(di_pos - di_neg) / cp.where(di_sum == 0, 1e-10, di_sum)
+        adx_p  = _cp_rolling_mean(dx, period)
+        if period == 14:
+            feats['adx']     = adx_p
+            feats['adx_pos'] = di_pos
+            feats['adx_neg'] = di_neg
+        feats[f'adx_{period}'] = adx_p
+    # ── Volatility regime ─────────────────────────────────────────────────
+    rv20  = feats.get('realvol_20',  _cp_rolling_std(ret, 20)  * cp.sqrt(525_600.0))
+    rv240 = feats.get('realvol_240', _cp_rolling_std(ret, 240) * cp.sqrt(525_600.0))
+    feats['vol_regime'] = rv20 / cp.where(rv240 == 0, 1e-10, rv240)
     # ── Transfer all GPU arrays back to CPU at once ───────────────────────
     result = {k: cp.asnumpy(v_arr) for k, v_arr in feats.items()}
 

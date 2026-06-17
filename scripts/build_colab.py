@@ -212,21 +212,28 @@ cells.append(md("""## Step 6 — Signal Generation
 
 Runs the strategy ensemble (Kalman StatArb + Mean Reversion + Trend Following)
 to generate trading signals from the feature matrix."""))
-cells.append(code("""from aiquant.strategies.ensemble import StrategyEnsemble
-import time
+cells.append(code("""import logging, time
+from aiquant.strategies.ensemble import StrategyEnsemble
+
+# Suppress strategy warnings to keep output clean
+logging.getLogger('aiquant.strategies.ensemble').setLevel(logging.ERROR)
+logging.getLogger('aiquant.strategies.mean_reversion').setLevel(logging.ERROR)
+logging.getLogger('aiquant.strategies.trend_following').setLevel(logging.ERROR)
+logging.getLogger('aiquant.strategies.stat_arb').setLevel(logging.ERROR)
 
 print('Generating ensemble signals...')
 t0 = time.time()
 ensemble = StrategyEnsemble()
 df_signals = ensemble.generate_signals(df_clean)
 
+n_total = max(len(df_signals), 1)   # guard against empty DataFrame
 n_long  = int((df_signals['final_signal'] ==  1).sum())
 n_short = int((df_signals['final_signal'] == -1).sum())
 n_flat  = int((df_signals['final_signal'] ==  0).sum())
-print(f'\\n✓ Signals generated in {time.time()-t0:.1f}s')
-print(f'  Long:  {n_long:,}  ({n_long/len(df_signals)*100:.1f}%)')
-print(f'  Short: {n_short:,}  ({n_short/len(df_signals)*100:.1f}%)')
-print(f'  Flat:  {n_flat:,}  ({n_flat/len(df_signals)*100:.1f}%)')"""))
+print(f'\\n✓ Signals generated in {time.time()-t0:.1f}s  ({n_total:,} bars)')
+print(f'  Long:  {n_long:,}  ({n_long/n_total*100:.1f}%)')
+print(f'  Short: {n_short:,}  ({n_short/n_total*100:.1f}%)')
+print(f'  Flat:  {n_flat:,}  ({n_flat/n_total*100:.1f}%)')"""))
 
 # ── Step 7: Backtest ──────────────────────────────────────────────────────────
 cells.append(md("""## Step 7 — Backtest (Backtrader)
