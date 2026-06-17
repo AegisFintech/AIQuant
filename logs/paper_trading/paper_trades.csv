@@ -1,0 +1,2 @@
+open_time,close_time,side,size_btc,entry_price,exit_price,realised_pnl,commission,reason
+2026-06-17 03:12:00+00:00,2026-06-17 03:25:00+00:00,short,0.03796296211934158,65847.074634,65722.731616,3.84716893238734,0.8732603497512516,Signal Flat
