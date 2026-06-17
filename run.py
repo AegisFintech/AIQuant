@@ -149,18 +149,9 @@ def fetch_data(pair: str = 'BTCUSDT', days: int = 90, force: bool = False) -> pd
 # ════════════════════════════════════════════════════════════════════════════
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Build all 100+ features."""
-    print(f"  {CYAN('⚙')}  Building features...")
-    from aiquant.features.technical import generate_all_technical_features
-    from aiquant.features.microstructure import generate_all_microstructure_features
-    from aiquant.features.statarb import generate_all_statarb_features
-
-    df = generate_all_technical_features(df)
-    df = generate_all_microstructure_features(df)
-    df = generate_all_statarb_features(df)
-    df = df.dropna()
-    print(f"  {GREEN('✓')} {len(df.columns)} features  ·  {len(df):,} usable bars")
-    return df
+    """Build all 100+ features with verbose per-step timing."""
+    from aiquant.features import build_full_feature_set
+    return build_full_feature_set(df, verbose=True)
 
 
 # ════════════════════════════════════════════════════════════════════════════
