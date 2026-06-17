@@ -35,6 +35,8 @@ import pandas as pd
 import time
 import platform
 import logging
+import warnings
+warnings.filterwarnings('ignore', message='.*highly fragmented.*', category=pd.errors.PerformanceWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -477,27 +479,33 @@ def _build_statarb_gpu(df: pd.DataFrame, cp) -> pd.DataFrame:
     returns_np = df['returns'].to_numpy(dtype=np.float64)
 
     hurst_arr = rolling_hurst_nb(close_np, window=240, max_lag=20)
-    df['hurst'] = hurst_arr
     bins   = np.array([0.0, 0.45, 0.55, 1.0])
     labels = np.array(['mean_reverting', 'random_walk', 'trending'])
     idx_r  = np.clip(np.digitize(hurst_arr, bins) - 1, 0, len(labels) - 1)
-    df['regime'] = labels[idx_r]
 
-    df['half_life'] = rolling_half_life_nb(close_np, window=240)
-
-    adf_arr = rolling_adf_fast_nb(close_np, window=240)
-    df['adf_pvalue']    = adf_arr
-    df['is_stationary'] = (adf_arr < 0.05).astype(np.int8)
-
+    adf_arr   = rolling_adf_fast_nb(close_np, window=240)
     km, kr, kz = kalman_filter_nb(close_np)
-    df['kalman_mean']     = km
-    df['kalman_residual'] = kr
-    df['kalman_zscore']   = kz
+    hl_arr    = rolling_half_life_nb(close_np, window=240)
+    rs_arr    = rolling_roll_spread_nb(close_np, window=20)
 
-    df['roll_spread'] = rolling_roll_spread_nb(close_np, window=20)
-
+    # Collect all CPU-computed columns into a dict, then concat once
+    cpu_cols = {
+        'hurst':           hurst_arr,
+        'regime':          labels[idx_r],
+        'half_life':       hl_arr,
+        'adf_pvalue':      adf_arr,
+        'is_stationary':   (adf_arr < 0.05).astype(np.int8),
+        'kalman_mean':     km,
+        'kalman_residual': kr,
+        'kalman_zscore':   kz,
+        'roll_spread':     rs_arr,
+    }
     for lag in [1, 2, 3, 5, 10]:
-        df[f'autocorr_{lag}'] = rolling_autocorr_nb(returns_np, window=60, lag=lag)
+        cpu_cols[f'autocorr_{lag}'] = rolling_autocorr_nb(returns_np, window=60, lag=lag)
+
+    # Single pd.concat — avoids all fragmentation warnings
+    cpu_df = pd.DataFrame(cpu_cols, index=df.index)
+    df = pd.concat([df, cpu_df], axis=1)
 
     return df
 
