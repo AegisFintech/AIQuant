@@ -201,8 +201,15 @@ def add_candle_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_all_technical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Master function: apply all technical feature groups."""
+    """
+    Master function: apply all technical feature groups.
+
+    Optimisation: takes a single df.copy() here so each sub-function
+    receives an already-copied frame and can operate in-place without
+    triggering CoW (Copy-on-Write) allocations on every column assignment.
+    """
     logger.info("Generating all technical features...")
+    df = df.copy()   # single copy at the top — sub-functions skip their own copy
     df = add_trend_features(df)
     df = add_momentum_features(df)
     df = add_volatility_features(df)

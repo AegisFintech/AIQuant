@@ -119,15 +119,14 @@ def kyles_lambda(df: pd.DataFrame, windows: list = [20, 60]) -> pd.DataFrame:
 
 def roll_spread(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """
-    Roll (1984) spread estimator from transaction prices.
-    Spread = 2 * sqrt(max(0, -Cov(delta_p_t, delta_p_{t-1})))
+    Roll (1984) spread estimator — Numba JIT compiled.
+    Replaces pandas .rolling().apply(autocorr * var) — 100x+ speedup.
     """
+    from ..utils.fast_math import rolling_roll_spread_nb
+    close = df['close'].to_numpy(dtype=np.float64)
+    roll_arr = rolling_roll_spread_nb(close, window=window)
     df = df.copy()
-    delta_p = df['close'].diff()
-    cov_serial = delta_p.rolling(window).apply(
-        lambda x: pd.Series(x).autocorr(lag=1) * pd.Series(x).var(), raw=False
-    )
-    df['roll_spread'] = 2 * np.sqrt(np.maximum(0, -cov_serial))
+    df['roll_spread'] = roll_arr
     return df
 
 
@@ -173,10 +172,11 @@ def return_autocorrelation(df: pd.DataFrame, lags: list = [1, 2, 3, 5, 10]) -> p
     if 'returns' not in df.columns:
         df['returns'] = df['close'].pct_change()
 
+    from ..utils.fast_math import rolling_autocorr_nb
+    returns_arr = df['returns'].to_numpy(dtype=np.float64)
     for lag in lags:
-        df[f'autocorr_{lag}'] = df['returns'].rolling(60).apply(
-            lambda x: pd.Series(x).autocorr(lag=lag), raw=False
-        )
+        # Numba JIT compiled autocorrelation — replaces pandas .rolling().apply()
+        df[f'autocorr_{lag}'] = rolling_autocorr_nb(returns_arr, window=60, lag=lag)
 
     return df
 

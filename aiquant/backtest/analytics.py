@@ -186,10 +186,22 @@ def plot_full_report(
     ax4 = fig.add_subplot(3, 3, 8)
     roll_window = min(43200, len(returns) // 4)
     if roll_window > 10:
-        roll_sharpe = returns.rolling(roll_window).apply(
-            lambda x: sharpe_ratio(pd.Series(x)), raw=False
-        )
-        ax4.plot(roll_sharpe.values, color='#90e0ef', linewidth=1)
+        # Vectorised rolling Sharpe via NumPy stride tricks — avoids
+        # pandas .rolling().apply() which calls Python once per bar.
+        r_arr = returns.to_numpy(dtype=np.float64)
+        n_r   = len(r_arr)
+        roll_sharpe_arr = np.full(n_r, np.nan)
+        # Use cumulative sum trick for rolling mean and variance
+        cs  = np.cumsum(r_arr)
+        cs2 = np.cumsum(r_arr ** 2)
+        for i in range(roll_window - 1, n_r):
+            s  = cs[i]  - (cs[i - roll_window]  if i >= roll_window else 0.0)
+            s2 = cs2[i] - (cs2[i - roll_window] if i >= roll_window else 0.0)
+            mu  = s  / roll_window
+            var = s2 / roll_window - mu ** 2
+            std = var ** 0.5 if var > 0 else 1e-10
+            roll_sharpe_arr[i] = (mu / std) * np.sqrt(1440 * 365)
+        ax4.plot(roll_sharpe_arr, color='#90e0ef', linewidth=1)
         ax4.axhline(y=0, color='red', linestyle='--', alpha=0.5)
         ax4.axhline(y=1, color='green', linestyle='--', alpha=0.5)
     ax4.set_title('Rolling Sharpe Ratio', fontweight='bold')

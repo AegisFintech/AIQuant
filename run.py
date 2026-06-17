@@ -48,6 +48,13 @@ logging.basicConfig(
 logger = logging.getLogger('aiquant')
 logger.setLevel(logging.INFO)
 
+# ── Numba JIT warm-up (pre-compile on import, ~0.5s, avoids first-call latency) ──
+try:
+    from aiquant.utils.fast_math import warmup as _nb_warmup
+    _nb_warmup()
+except Exception:
+    pass  # Numba optional — falls back to pandas if unavailable
+
 # ── Colour helpers (works on Linux/Mac; gracefully degrades on Windows) ─────
 def _c(code, text):
     if platform.system() == 'Windows':
