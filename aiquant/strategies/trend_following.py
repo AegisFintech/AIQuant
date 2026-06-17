@@ -69,34 +69,44 @@ class TrendFollowingStrategy:
         hurst     = df['hurst'].to_numpy(dtype=np.float64)
         vol_ratio = df['vol_ratio'].to_numpy(dtype=np.float64)
 
-        # Regime, strength, and volume filters
-        trending     = hurst     > self.hurst_min
-        strong_trend = adx       > self.adx_threshold
-        vol_ok       = vol_ratio > self.vol_ratio_min
+        n = len(df)
+
+        # Replace NaN with neutral values before boolean ops
+        ema_fast  = np.nan_to_num(ema_fast,  nan=0.0)
+        ema_slow  = np.nan_to_num(ema_slow,  nan=0.0)
+        adx       = np.nan_to_num(adx,       nan=0.0)
+        hurst     = np.nan_to_num(hurst,     nan=0.5)
+        vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+
+        # Regime, strength, and volume filters — all produce shape (n,) bool
+        trending     = (hurst     > self.hurst_min).reshape(n)
+        strong_trend = (adx       > self.adx_threshold).reshape(n)
+        vol_ok       = (vol_ratio > self.vol_ratio_min).reshape(n)
 
         # EMA crossover state (bool arrays)
-        ema_bull = ema_fast > ema_slow   # fast above slow = bullish
-        ema_bear = ema_fast < ema_slow   # fast below slow = bearish
+        ema_bull = (ema_fast > ema_slow).reshape(n)
+        ema_bear = (ema_fast < ema_slow).reshape(n)
 
-        # MACD confirmation
+        # MACD confirmation — always produce shape (n,)
         if macd_col in df.columns:
-            macd = df[macd_col].to_numpy(dtype=np.float64)
-            macd_bull = macd > 0
-            macd_bear = macd < 0
+            macd = np.nan_to_num(df[macd_col].to_numpy(dtype=np.float64), nan=0.0).reshape(n)
+            macd_bull = (macd > 0).reshape(n)
+            macd_bear = (macd < 0).reshape(n)
         else:
-            macd_bull = np.ones(len(df), dtype=bool)
-            macd_bear = np.ones(len(df), dtype=bool)
+            macd_bull = np.ones(n, dtype=bool)
+            macd_bear = np.ones(n, dtype=bool)
 
         long_state  = trending & strong_trend & vol_ok & ema_bull & macd_bull
         short_state = trending & strong_trend & vol_ok & ema_bear & macd_bear
 
-        # Crossover detection via np.diff (transition 0->1 only, not persistent state)
-        # np.diff returns array of length n-1; prepend False to preserve alignment
-        long_cross  = np.concatenate([[False], np.diff(long_state.astype(np.int8))  > 0])
-        short_cross = np.concatenate([[False], np.diff(short_state.astype(np.int8)) > 0])
+        # Crossover detection — safe: explicitly ensure length n
+        long_diff  = np.diff(long_state.astype(np.int8))
+        short_diff = np.diff(short_state.astype(np.int8))
+        long_cross  = np.concatenate([[False], long_diff  > 0])[:n]
+        short_cross = np.concatenate([[False], short_diff > 0])[:n]
 
         # Build int8 signal array
-        signals_arr = np.zeros(len(df), dtype=np.int8)
+        signals_arr = np.zeros(n, dtype=np.int8)
         signals_arr[long_cross]  =  1
         signals_arr[short_cross] = -1
 
