@@ -226,3 +226,4 @@ data/processed/
 logs/
 results/*.png
 results/*.csv
+*.zip
