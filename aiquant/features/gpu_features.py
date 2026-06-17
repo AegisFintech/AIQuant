@@ -305,9 +305,9 @@ def _build_technical_gpu(df: pd.DataFrame, cp) -> pd.DataFrame:
     # ── Transfer all GPU arrays back to CPU at once ───────────────────────
     result = {k: cp.asnumpy(v_arr) for k, v_arr in feats.items()}
 
-    # Assign to DataFrame
-    for col, arr in result.items():
-        df[col] = arr
+    # Assign all new columns at once via pd.concat to avoid DataFrame fragmentation
+    new_cols = pd.DataFrame(result, index=df.index)
+    df = pd.concat([df, new_cols], axis=1)
 
     return df
 
@@ -421,8 +421,8 @@ def _build_microstructure_gpu(df: pd.DataFrame, cp) -> pd.DataFrame:
 
     # ── Transfer back to CPU ──────────────────────────────────────────────
     result = {k: cp.asnumpy(v_arr) for k, v_arr in feats.items()}
-    for col, arr in result.items():
-        df[col] = arr
+    new_cols = pd.DataFrame(result, index=df.index)
+    df = pd.concat([df, new_cols], axis=1)
 
     return df
 
@@ -462,10 +462,10 @@ def _build_statarb_gpu(df: pd.DataFrame, cp) -> pd.DataFrame:
     feats['cusum_neg']    = cp.nancumsum(cp.maximum(0.0, -standardised))
     feats['regime_break'] = ((feats['cusum_pos'] > 3.0) | (feats['cusum_neg'] > 3.0)).astype(cp.int8)
 
-    # ── Transfer GPU features back ────────────────────────────────────────
+    # ── Transfer GPU features back — use pd.concat to avoid fragmentation ──
     result = {k: cp.asnumpy(v_arr) for k, v_arr in feats.items()}
-    for col, arr in result.items():
-        df[col] = arr
+    new_cols = pd.DataFrame(result, index=df.index)
+    df = pd.concat([df, new_cols], axis=1)
 
     # ── CPU Numba parallel: Hurst, half-life, ADF, Kalman, Roll spread ────
     from ..utils.fast_math import (
