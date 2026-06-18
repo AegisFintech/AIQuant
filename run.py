@@ -190,10 +190,25 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     from sklearn.feature_selection import mutual_info_classif
     import xgboost as xgb
     import lightgbm as lgb
+    import gc
 
     n      = len(df)
     c      = df['close'].to_numpy(np.float64)
     dates  = df.index
+
+    # ── Memory banner ────────────────────────────────────────────────────────
+    try:
+        import psutil
+        _mem = psutil.virtual_memory()
+        _used_gb  = (_mem.total - _mem.available) / 1e9
+        _total_gb = _mem.total / 1e9
+        print(f"  {DIM(f'RAM: {_used_gb:.1f} / {_total_gb:.1f} GB used  ·  {n:,} bars  ·  {len(df.columns)} columns')}")
+    except Exception:
+        pass
+
+    # ── Downcast feature DataFrame to float32 to halve memory ───────────────
+    float_cols = df.select_dtypes(include=[np.float64]).columns
+    df[float_cols] = df[float_cols].astype(np.float32)
 
     # ── Label generation ────────────────────────────────────────────────────
     print(f"\n  {CYAN('⚙')}  [1/5] Generating labels...")
@@ -222,17 +237,14 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     drop_cols    = ['open', 'high', 'low', 'close', 'volume']
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     feature_cols = [c_ for c_ in numeric_cols if c_ not in drop_cols]
-    X_all        = df[feature_cols].to_numpy(np.float64)
-    X_all        = np.nan_to_num(X_all, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Load saved top features if available (avoids recomputing MI)
+    # Load saved top features if available — avoids building the full X_all matrix
     params_path = CONFIG_DIR / 'ml_best_params.json'
     saved_features = None
     if params_path.exists():
         try:
             with open(params_path) as f:
                 saved = json.load(f)
-            # Only use saved features if they all exist in current df
             sf = saved.get('top_features', [])
             if sf and all(feat in feature_cols for feat in sf):
                 saved_features = sf
@@ -241,23 +253,46 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             pass
 
     if saved_features is None:
+        # Only build X_all for MI scoring — use a sample to save RAM
+        X_all = df[feature_cols].to_numpy(np.float32)   # float32: half the RAM of float64
+        X_all = np.nan_to_num(X_all, nan=0.0, posinf=0.0, neginf=0.0)
         sample_idx = np.random.choice(
             np.where(valid_mask)[0], size=min(20000, valid_mask.sum()), replace=False
         )
         sample_idx.sort()
-        X_sample = X_all[sample_idx]
+        X_sample = X_all[sample_idx].astype(np.float64)   # MI needs float64
         y_sample = labels[sample_idx]
-        X_sample = np.nan_to_num(X_sample, nan=0.0, posinf=0.0, neginf=0.0)
         y_binary = (y_sample != 0).astype(int)
         mi_scores = mutual_info_classif(X_sample, y_binary, random_state=42, n_neighbors=5)
         mi_df     = pd.DataFrame({'feature': feature_cols, 'mi': mi_scores}).sort_values('mi', ascending=False)
         TOP_K     = 60
         saved_features = mi_df.head(TOP_K)['feature'].tolist()
         print(f"  {GREEN('✓')} Top {TOP_K} features selected from {len(feature_cols)} total")
+        # Free X_all immediately — no longer needed
+        del X_all, X_sample
+        gc.collect()
 
     top_features = saved_features
-    X_sel = df[top_features].to_numpy(np.float64)
+
+    # Extract only the top-60 feature matrix (float32 = 0.63 GB for 2.6M bars)
+    X_sel = df[top_features].to_numpy(np.float32)
     X_sel = np.nan_to_num(X_sel, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Free the full feature DataFrame — X_sel is all we need from here on
+    _ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
+    df_ohlcv = df[_ohlcv_cols].copy()   # keep OHLCV for backtest simulation
+    del df
+    gc.collect()
+    df = df_ohlcv   # rebind name so rest of function still works
+
+    try:
+        import psutil
+        _mem = psutil.virtual_memory()
+        _used_gb = (_mem.total - _mem.available) / 1e9
+        _total_gb = _mem.total / 1e9
+        print(f"  {DIM(f'RAM after feature selection: {_used_gb:.1f} / {_total_gb:.1f} GB')}")
+    except Exception:
+        pass
 
     print(f"  {DIM('Top 5: ' + ', '.join(top_features[:5]))}")
 
@@ -400,8 +435,8 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             SEQ_LEN    = 30
             LSTM_FEATS = 20
-            lstm_feats = top_features[:LSTM_FEATS]
-            X_lstm_raw = df[lstm_feats].to_numpy(np.float64)
+            # X_sel already holds the top-60 features as float32 — slice first 20
+            X_lstm_raw = X_sel[:, :LSTM_FEATS].astype(np.float32)
             X_lstm_raw = np.nan_to_num(X_lstm_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
             class LSTMAttn(nn.Module):
