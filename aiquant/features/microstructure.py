@@ -161,21 +161,26 @@ def return_autocorrelation(df: pd.DataFrame, lags: list = [1, 2, 3, 5, 10]) -> p
 
 def intraday_seasonality(df: pd.DataFrame) -> pd.DataFrame:
     idx = df.index
-    hour = idx.hour
+    hour   = idx.hour
     minute = idx.minute
-    dow = idx.dayofweek
+    dow    = idx.dayofweek
+    # hour_sin/cos and dow_sin/cos are already added by technical.py — skip them
+    # to avoid duplicate columns that break the float32 cast in run_ml_backtest.
     new_cols = {
         'hour':        hour,
         'minute':      minute,
         'day_of_week': dow,
         'is_weekend':  (dow >= 5).astype(np.int8),
-        'hour_sin':    np.sin(2 * np.pi * hour / 24),
-        'hour_cos':    np.cos(2 * np.pi * hour / 24),
-        'dow_sin':     np.sin(2 * np.pi * dow / 7),
-        'dow_cos':     np.cos(2 * np.pi * dow / 7),
         'minute_sin':  np.sin(2 * np.pi * minute / 60),
         'minute_cos':  np.cos(2 * np.pi * minute / 60),
     }
+    # Only add hour/dow cyclical cols if technical.py didn't already add them
+    if 'hour_sin' not in df.columns:
+        new_cols['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+        new_cols['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+    if 'dow_sin' not in df.columns:
+        new_cols['dow_sin'] = np.sin(2 * np.pi * dow / 7)
+        new_cols['dow_cos'] = np.cos(2 * np.pi * dow / 7)
     return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 

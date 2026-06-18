@@ -323,13 +323,29 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     folds = _build_folds(n, TRAIN_BARS, TEST_BARS, STEP_BARS, FORWARD_BARS)
 
-    # Fallback: if dynamic sizing produced fewer than 10 folds use fixed defaults
+    # Fallback 1: if dynamic sizing produced fewer than 10 folds, use fixed 30d/7d
     if len(folds) < 10:
         train_days, step_days = 30, 7
         TRAIN_BARS = train_days * BARS_PER_DAY
         TEST_BARS  = step_days  * BARS_PER_DAY
         STEP_BARS  = TEST_BARS
         folds = _build_folds(n, TRAIN_BARS, TEST_BARS, STEP_BARS, FORWARD_BARS)
+
+    # Fallback 2: dataset too short for 30d/7d — shrink to fit available data
+    # Minimum: train=50% of data, test=remaining, at least 1 fold
+    if len(folds) == 0:
+        train_days = max(3, int(days_total * 0.5))
+        step_days  = max(1, int(days_total * 0.3))
+        TRAIN_BARS = train_days * BARS_PER_DAY
+        TEST_BARS  = step_days  * BARS_PER_DAY
+        STEP_BARS  = TEST_BARS
+        folds = _build_folds(n, TRAIN_BARS, TEST_BARS, STEP_BARS, FORWARD_BARS)
+
+    if len(folds) == 0:
+        raise ValueError(
+            f"Dataset too short for walk-forward CV: {days_total:.0f} days available. "
+            f"Minimum required: ~10 days. Use --days 45 or more."
+        )
 
     print(f"  {GREEN('✓')} {len(folds)} folds  "
           f"(train={train_days}d · test/step={step_days}d · dataset={days_total:.0f}d)")
