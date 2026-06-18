@@ -363,6 +363,33 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     _xgb_tree_method = 'hist'
     _xgb_device      = 'cuda' if _ml_device == 'cuda' else 'cpu'
 
+    # LightGBM device — prefer 'cuda' (NVIDIA CUDA) over 'gpu' (OpenCL)
+    # 'gpu' uses OpenCL which is 2-3x slower than native CUDA on T4
+    # Fall back to 'gpu' if 'cuda' is not supported by installed LGB version
+    _lgb_device = 'cpu'
+    if _ml_device == 'cuda':
+        try:
+            import lightgbm as _lgb_test
+            _lgb_ver = tuple(int(x) for x in _lgb_test.__version__.split('.')[:2])
+            _lgb_device = 'cuda' if _lgb_ver >= (3, 3) else 'gpu'
+        except Exception:
+            _lgb_device = 'gpu'
+
+    # Suppress LightGBM OpenCL/CUDA compiler messages ("1 warning generated.")
+    import os as _os
+    import ctypes as _ctypes
+    _lgb_verbose_env = _os.environ.get('LIGHTGBM_VERBOSITY', None)
+    _os.environ['LIGHTGBM_VERBOSITY'] = '-1'
+
+    # Report GPU RAM if available
+    if _ml_device == 'cuda':
+        try:
+            import torch as _t2
+            _free, _total = _t2.cuda.mem_get_info(0)
+            print(f"  {DIM(f'  GPU RAM: {(_total-_free)/1e9:.1f} / {_total/1e9:.1f} GB used')}")
+        except Exception:
+            pass
+
     print(f"\n  {CYAN('⚙')}  [4/5] Training XGBoost + LightGBM (walk-forward)...")
     print(f"  {DIM(f'  Device: {_gpu_name}  ·  XGBoost tree_method=hist device={_xgb_device}  ·  {len(folds)} folds')}")
     print(f"  {DIM(f'  Each fold: ~43k train bars × 60 features  →  10k test bars')}")
@@ -412,7 +439,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             num_leaves=31, subsample=0.8, colsample_bytree=0.8,
             min_child_samples=20, reg_alpha=0.1, reg_lambda=1.0,
             class_weight='balanced', random_state=42, verbose=-1,
-            device='gpu' if _ml_device == 'cuda' else 'cpu',
+            device=_lgb_device,
         )
         lgb_model.fit(X_tr_s, y_tr, sample_weight=sample_wt)
         lgb_proba = lgb_model.predict_proba(X_te_s)
@@ -492,7 +519,9 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 X_tr_t    = (X_tr_t - feat_mean) / feat_std
 
                 ds      = TensorDataset(X_tr_t, y_tr_t)
-                loader  = DataLoader(ds, batch_size=512, shuffle=True)
+                # Larger batch size saturates T4 GPU better (512 → 2048)
+                _lstm_batch = 2048 if _ml_device == 'cuda' else 512
+                loader  = DataLoader(ds, batch_size=_lstm_batch, shuffle=True)
                 model   = LSTMAttn(LSTM_FEATS).to(DEVICE)
                 opt     = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
                 sched   = torch.optim.lr_scheduler.StepLR(opt, step_size=3, gamma=0.5)
