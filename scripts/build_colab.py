@@ -336,22 +336,32 @@ Signals are generated **only on out-of-sample data** (46 walk-forward folds × 7
 cells.append(code("""import subprocess, sys, time, os
 
 fast_flag = ['--fast'] if FAST_MODE else []
-cmd = [sys.executable, 'run.py', 'backtest',
+cmd = [sys.executable, '-u', 'run.py', 'backtest',
        '--pair', PAIR, '--days', str(DAYS),
        '--capital', str(INITIAL_CAPITAL)] + fast_flag
 
-print(f'Running: {\" \".join(cmd)}')
-print(f'Fast mode: {FAST_MODE}  (LSTM: {\"SKIP\" if FAST_MODE else \"ENABLED\"})')
+print(f'Running: {" ".join(cmd)}')
+print(f'Fast mode: {FAST_MODE}  (LSTM: {"SKIP" if FAST_MODE else "ENABLED"})')
 print()
 
 t0 = time.time()
-result = subprocess.run(
+env = os.environ.copy()
+env['PYTHONUNBUFFERED'] = '1'
+
+# Stream output line-by-line so progress appears immediately in Colab
+with subprocess.Popen(
     cmd,
-    capture_output=False,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
     text=True,
+    bufsize=1,
     cwd='/content/AIQuant',
-    timeout=7200,   # 2 hour max
-)
+    env=env,
+) as proc:
+    for line in proc.stdout:
+        print(line, end='', flush=True)
+    proc.wait()
+
 elapsed = time.time() - t0
 print(f'\\n✓ Backtest completed in {elapsed/60:.1f} min')"""))
 
