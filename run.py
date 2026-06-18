@@ -376,10 +376,18 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             _lgb_device = 'gpu'
 
     # Suppress LightGBM OpenCL/CUDA compiler messages ("1 warning generated.")
+    # These are emitted by the native C library to file descriptor 2 (stderr)
+    # before Python's environment is read, so os.environ alone is not enough.
+    # We redirect fd=2 to /dev/null for the duration of training, then restore.
     import os as _os
-    import ctypes as _ctypes
-    _lgb_verbose_env = _os.environ.get('LIGHTGBM_VERBOSITY', None)
     _os.environ['LIGHTGBM_VERBOSITY'] = '-1'
+    _os.environ['LGB_VERBOSITY']      = '-1'
+    # C-level stderr redirect
+    _devnull_fd  = _os.open(_os.devnull, _os.O_WRONLY)
+    _stderr_fd   = 2
+    _stderr_save = _os.dup(_stderr_fd)   # save original stderr fd
+    _os.dup2(_devnull_fd, _stderr_fd)    # point stderr -> /dev/null
+    _os.close(_devnull_fd)
 
     # Report GPU RAM if available
     if _ml_device == 'cuda':
@@ -460,6 +468,10 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             f"  {CYAN(f'ETA ~{_remaining:.0f}s')}",
             flush=True
         )
+
+    # Restore stderr after XGB+LGB training (was redirected to suppress LGB warnings)
+    _os.dup2(_stderr_save, _stderr_fd)
+    _os.close(_stderr_save)
 
     print(f"  {GREEN('✓')} OOS coverage: {oos_mask.sum():,} bars ({oos_mask.mean()*100:.1f}%)"
           f"  {DIM(f'  total {time.time()-_t_xgb_start:.0f}s')}")
