@@ -168,17 +168,32 @@ print(f'  Hyperliquid live trading: {\"ENABLED\" if HYPERLIQUID_PRIVATE_KEY else
 )"""))
 
 # ── Step 4: Download Binance Vision data ──────────────────────────────────────
-cells.append(md("""## Step 4 — Download 365-Day Binance Vision Dataset
+cells.append(md("""## Step 4 — Download Binance Vision Dataset
 
-Downloads 12 months of BTCUSDT 1-minute OHLCV data from Binance Vision (free, no API key).
-Each monthly file is ~3-4 MB compressed. Total download: ~40 MB.
-Data is cached locally so subsequent runs are instant.
+Downloads the required monthly BTCUSDT 1-minute OHLCV files from Binance Vision (free, no API key).
+The number of files is **automatically calculated from the `DAYS` setting in Step 3** —
+change `DAYS = 1825` and this step downloads 5 years of data automatically.
 
-**Coverage:** Jun 2025 – Jun 2026 · 530,628 bars · BTC $60k → $126k"""))
+| DAYS | Files | Approx size | Approx bars |
+|------|-------|-------------|-------------|
+| 365 (1 year) | 12 | ~40 MB | 530k |
+| 730 (2 years) | 24 | ~80 MB | 1.05M |
+| 1095 (3 years) | 36 | ~120 MB | 1.58M |
+| 1825 (5 years) | 60 | ~200 MB | 2.63M |
+
+> Binance Vision has BTC 1m data going back to **January 2017**. Files are cached so re-runs are instant."""))
 cells.append(code("""import os, sys, requests, zipfile, time
 from pathlib import Path
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
+
+try:
+    from dateutil.relativedelta import relativedelta as _rd
+except ImportError:
+    import subprocess
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'python-dateutil'], check=True)
+    from dateutil.relativedelta import relativedelta as _rd
 
 RAW_DIR = Path('/content/AIQuant/data/raw')
 RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -187,12 +202,18 @@ BINANCE_VISION_BASE = 'https://data.binance.vision/data/spot/monthly/klines/BTCU
 COLS = ['open_time','open','high','low','close','volume',
         'close_time','quote_vol','n_trades','taker_buy_base','taker_buy_quote','ignore']
 
-months = [
-    '2025-06','2025-07','2025-08','2025-09','2025-10','2025-11',
-    '2025-12','2026-01','2026-02','2026-03','2026-04','2026-05'
-]
+# Dynamically compute required months from DAYS (set in Step 3)
+now_utc    = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+start_date = now_utc - _rd(days=DAYS)
 
-print(f'Downloading {len(months)} monthly files from Binance Vision...')
+months = []
+cursor = start_date.replace(day=1)
+while cursor < now_utc:
+    months.append(cursor.strftime('%Y-%m'))
+    cursor += _rd(months=1)
+
+print(f'DAYS={DAYS}  →  {len(months)} monthly files required')
+print(f'Coverage: {months[0]} → {months[-1]}')
 print()
 t0 = time.time()
 
@@ -206,26 +227,28 @@ for ym in months:
     try:
         r = requests.get(zip_url, timeout=120, stream=True)
         if r.status_code != 200:
-            print(f'  ✗ {ym}  HTTP {r.status_code}')
+            print(f'  ✗ {ym}  HTTP {r.status_code} (not yet on Binance Vision — skipped)')
             continue
+        downloaded = 0
         with open(zip_path, 'wb') as f:
             for chunk in r.iter_content(65536):
                 f.write(chunk)
+                downloaded += len(chunk)
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(RAW_DIR)
         zip_path.unlink()
-        print(f'  ✓ {ym}  downloaded')
+        print(f'  ✓ {ym}  downloaded  ({downloaded/1e6:.1f} MB)')
     except Exception as e:
         print(f'  ✗ {ym}  {e}')
 
-# Also fetch recent Hyperliquid bars (last ~5 days)
+# Fetch recent Hyperliquid bars to bridge gap to today
 print()
-print('Fetching recent bars from Hyperliquid...')
+print('Fetching recent bars from Hyperliquid (last 7 days)...')
 try:
     import time as _time
     url = 'https://api.hyperliquid.xyz/info'
     now_ms   = int(_time.time() * 1000)
-    start_ms = now_ms - 5 * 24 * 60 * 60 * 1000
+    start_ms = now_ms - 7 * 24 * 60 * 60 * 1000
     r = requests.post(url, json={
         'type': 'candleSnapshot',
         'req': {'coin': 'BTC', 'interval': '1m', 'startTime': start_ms, 'endTime': now_ms}
@@ -275,10 +298,11 @@ combined.to_parquet(RAW_DIR / 'BTCUSDT_1m_full.parquet')
 
 elapsed = time.time() - t0
 print(f'\\n✓ Dataset ready in {elapsed:.1f}s')
+print(f'  Months : {len(months)} files')
 print(f'  Bars   : {len(combined):,}')
 print(f'  Range  : {combined.index[0].date()} → {combined.index[-1].date()}')
-print(f'  Price  : ${combined[\"close\"].min():,.0f} → ${combined[\"close\"].max():,.0f}')
-print(f'  Size   : {(RAW_DIR / \"BTCUSDT_1m_full.parquet\").stat().st_size/1e6:.1f} MB')
+print(f'  Price  : ${combined["close"].min():,.0f} → ${combined["close"].max():,.0f}')
+print(f'  Size   : {(RAW_DIR / "BTCUSDT_1m_full.parquet").stat().st_size/1e6:.1f} MB')
 combined.tail(3)"""))
 
 # ── Step 5: GPU Feature Engineering ──────────────────────────────────────────
