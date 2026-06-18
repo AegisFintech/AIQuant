@@ -3,8 +3,8 @@ aiquant/features/microstructure.py
 ====================================
 Market microstructure features for HFT and statistical arbitrage.
 
-Memory-efficient: all functions mutate the DataFrame in-place (no df.copy()).
-The caller owns the DataFrame and is responsible for copying if needed.
+Memory-efficient: each stage builds new columns as a dict, then pd.concat once
+at the end — avoids DataFrame fragmentation and PerformanceWarning spam.
 
 Implements:
   - Order Flow Imbalance (OFI)
@@ -27,186 +27,160 @@ logger = logging.getLogger(__name__)
 
 
 def order_flow_imbalance(df: pd.DataFrame, windows: list = [5, 15, 30, 60]) -> pd.DataFrame:
-    """
-    Proxy for Order Flow Imbalance using price and volume.
-    When price rises with volume, buying pressure dominates (OFI > 0).
-    When price falls with volume, selling pressure dominates (OFI < 0).
-    """
-    # In-place — no df.copy()
-    df['tick_direction'] = np.sign(df['close'] - df['close'].shift(1))
-    df['signed_volume'] = df['tick_direction'] * df['volume']
-
+    tick_dir    = np.sign(df['close'] - df['close'].shift(1))
+    signed_vol  = tick_dir * df['volume']
+    new_cols = {
+        'tick_direction': tick_dir,
+        'signed_volume':  signed_vol,
+    }
     for w in windows:
-        df[f'ofi_{w}'] = df['signed_volume'].rolling(w).sum()
-        df[f'ofi_norm_{w}'] = df[f'ofi_{w}'] / df['volume'].rolling(w).sum().replace(0, np.nan)
-
-    return df
+        ofi = signed_vol.rolling(w).sum()
+        new_cols[f'ofi_{w}']      = ofi
+        new_cols[f'ofi_norm_{w}'] = ofi / df['volume'].rolling(w).sum().replace(0, np.nan)
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def trade_imbalance_proxy(df: pd.DataFrame, windows: list = [10, 30, 60]) -> pd.DataFrame:
-    """
-    Estimate buy/sell volume split using the Lee-Ready algorithm proxy.
-    Buys: volume when close > open; Sells: volume when close < open.
-    """
-    # In-place — no df.copy()
-    hl_range = (df['high'] - df['low']).replace(0, np.nan)
-    df['buy_vol_proxy']  = df['volume'] * ((df['close'] - df['low']) / hl_range)
-    df['sell_vol_proxy'] = df['volume'] * ((df['high'] - df['close']) / hl_range)
-
+    hl_range     = (df['high'] - df['low']).replace(0, np.nan)
+    buy_vol_prx  = df['volume'] * ((df['close'] - df['low'])  / hl_range)
+    sell_vol_prx = df['volume'] * ((df['high']  - df['close']) / hl_range)
+    new_cols = {
+        'buy_vol_proxy':  buy_vol_prx,
+        'sell_vol_proxy': sell_vol_prx,
+    }
     for w in windows:
         total = df['volume'].rolling(w).sum().replace(0, np.nan)
-        df[f'buy_ratio_{w}']       = df['buy_vol_proxy'].rolling(w).sum() / total
-        df[f'sell_ratio_{w}']      = df['sell_vol_proxy'].rolling(w).sum() / total
-        df[f'trade_imbalance_{w}'] = df[f'buy_ratio_{w}'] - df[f'sell_ratio_{w}']
-
-    return df
+        br = buy_vol_prx.rolling(w).sum() / total
+        sr = sell_vol_prx.rolling(w).sum() / total
+        new_cols[f'buy_ratio_{w}']       = br
+        new_cols[f'sell_ratio_{w}']      = sr
+        new_cols[f'trade_imbalance_{w}'] = br - sr
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def vpin(df: pd.DataFrame, bucket_size: int = 50, n_buckets: int = 50) -> pd.DataFrame:
-    """
-    Simplified VPIN (Volume-Synchronized Probability of Informed Trading).
-    High VPIN signals toxic order flow and potential adverse selection.
-    """
-    # In-place — no df.copy()
-    hl_range = (df['high'] - df['low']).replace(0, np.nan)
-    buy_frac = ((df['close'] - df['low']) / hl_range).fillna(0.5).clip(0, 1)
-    df['buy_frac']      = buy_frac
-    df['buy_vol']       = buy_frac * df['volume']
-    df['sell_vol']      = (1 - buy_frac) * df['volume']
-    df['abs_imbalance'] = (df['buy_vol'] - df['sell_vol']).abs()
-
-    window    = bucket_size * n_buckets
-    total_vol = df['volume'].rolling(window).sum().replace(0, np.nan)
-    df['vpin'] = df['abs_imbalance'].rolling(window).sum() / total_vol
-
-    return df
+    hl_range     = (df['high'] - df['low']).replace(0, np.nan)
+    buy_frac     = ((df['close'] - df['low']) / hl_range).fillna(0.5).clip(0, 1)
+    buy_vol      = buy_frac * df['volume']
+    sell_vol     = (1 - buy_frac) * df['volume']
+    abs_imb      = (buy_vol - sell_vol).abs()
+    window       = bucket_size * n_buckets
+    total_vol    = df['volume'].rolling(window).sum().replace(0, np.nan)
+    new_cols = {
+        'buy_frac':      buy_frac,
+        'buy_vol':       buy_vol,
+        'sell_vol':      sell_vol,
+        'abs_imbalance': abs_imb,
+        'vpin':          abs_imb.rolling(window).sum() / total_vol,
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def amihud_illiquidity(df: pd.DataFrame, windows: list = [20, 60, 120]) -> pd.DataFrame:
-    """
-    Amihud (2002) illiquidity ratio: |return| / dollar_volume.
-    Higher values indicate lower liquidity and higher price impact.
-    """
-    # In-place — no df.copy()
-    df['dollar_volume'] = df['close'] * df['volume']
+    dollar_vol = df['close'] * df['volume']
     if 'returns' not in df.columns:
-        df['returns'] = df['close'].pct_change()
-    df['abs_return'] = df['returns'].abs()
-
+        returns = df['close'].pct_change()
+    else:
+        returns = df['returns']
+    abs_ret = returns.abs()
+    new_cols = {
+        'dollar_volume': dollar_vol,
+        'abs_return':    abs_ret,
+    }
     for w in windows:
-        df[f'amihud_{w}'] = (
-            df['abs_return'] / df['dollar_volume'].replace(0, np.nan)
+        new_cols[f'amihud_{w}'] = (
+            abs_ret / dollar_vol.replace(0, np.nan)
         ).rolling(w).mean() * 1e6
-
-    return df
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def kyles_lambda(df: pd.DataFrame, windows: list = [20, 60]) -> pd.DataFrame:
-    """
-    Kyle's Lambda: price impact per unit of signed order flow.
-    Estimated via OLS regression of price change on signed volume.
-    """
-    # In-place — no df.copy()
-    if 'signed_volume' not in df.columns:
-        df['tick_direction'] = np.sign(df['close'] - df['close'].shift(1))
-        df['signed_volume']  = df['tick_direction'] * df['volume']
-
+    if 'signed_volume' in df.columns:
+        signed_vol = df['signed_volume']
+    else:
+        signed_vol = np.sign(df['close'] - df['close'].shift(1)) * df['volume']
     price_change = df['close'].diff()
-
+    new_cols = {}
+    if 'signed_volume' not in df.columns:
+        new_cols['signed_volume'] = signed_vol
     for w in windows:
-        cov = price_change.rolling(w).cov(df['signed_volume'])
-        var = df['signed_volume'].rolling(w).var().replace(0, np.nan)
-        df[f'kyle_lambda_{w}'] = cov / var
-
-    return df
+        cov = price_change.rolling(w).cov(signed_vol)
+        var = signed_vol.rolling(w).var().replace(0, np.nan)
+        new_cols[f'kyle_lambda_{w}'] = cov / var
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def roll_spread(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    """
-    Roll (1984) spread estimator — Numba JIT compiled.
-    """
     from ..utils.fast_math import rolling_roll_spread_nb
     close    = df['close'].to_numpy(dtype=np.float64)
     roll_arr = rolling_roll_spread_nb(close, window=window)
-    # In-place — no df.copy()
-    df['roll_spread'] = roll_arr
-    return df
+    return pd.concat([df, pd.DataFrame({'roll_spread': roll_arr}, index=df.index)], axis=1)
 
 
 def bid_ask_spread_proxy(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Corwin-Schultz (2012) high-low spread estimator.
-    """
-    # In-place — no df.copy()
-    log_hl  = np.log(df['high'] / df['low'].replace(0, np.nan))
-    beta    = (log_hl ** 2).rolling(2).sum()
-    h_max   = df['high'].rolling(2).max()
-    l_min   = df['low'].rolling(2).min()
-    gamma   = (np.log(h_max / l_min.replace(0, np.nan))) ** 2
-    alpha   = (np.sqrt(2 * beta) - np.sqrt(beta)) / (3 - 2 * np.sqrt(2)) \
-              - np.sqrt(gamma / (3 - 2 * np.sqrt(2)))
-    spread  = 2 * (np.exp(alpha) - 1) / (1 + np.exp(alpha))
-    df['cs_spread'] = spread.clip(lower=0)
-    return df
+    log_hl = np.log(df['high'] / df['low'].replace(0, np.nan))
+    beta   = (log_hl ** 2).rolling(2).sum()
+    h_max  = df['high'].rolling(2).max()
+    l_min  = df['low'].rolling(2).min()
+    gamma  = (np.log(h_max / l_min.replace(0, np.nan))) ** 2
+    alpha  = (np.sqrt(2 * beta) - np.sqrt(beta)) / (3 - 2 * np.sqrt(2)) \
+             - np.sqrt(gamma / (3 - 2 * np.sqrt(2)))
+    spread = (2 * (np.exp(alpha) - 1) / (1 + np.exp(alpha))).clip(lower=0)
+    return pd.concat([df, pd.DataFrame({'cs_spread': spread}, index=df.index)], axis=1)
 
 
 def realized_variance(df: pd.DataFrame, windows: list = [20, 60, 120]) -> pd.DataFrame:
-    """
-    Realized variance and bipower variation for jump detection.
-    """
-    # In-place — no df.copy()
+    if 'log_returns' in df.columns:
+        log_ret = df['log_returns']
+    else:
+        log_ret = np.log(df['close'] / df['close'].shift(1))
+    new_cols = {}
     if 'log_returns' not in df.columns:
-        df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
-
+        new_cols['log_returns'] = log_ret
+    abs_ret = log_ret.abs()
     for w in windows:
-        df[f'rv_{w}']   = (df['log_returns'] ** 2).rolling(w).sum()
-        abs_ret         = df['log_returns'].abs()
-        df[f'bpv_{w}']  = (abs_ret * abs_ret.shift(1)).rolling(w).sum() * (np.pi / 2)
-        df[f'jump_{w}'] = np.maximum(0, df[f'rv_{w}'] - df[f'bpv_{w}'])
-
-    return df
+        rv  = (log_ret ** 2).rolling(w).sum()
+        bpv = (abs_ret * abs_ret.shift(1)).rolling(w).sum() * (np.pi / 2)
+        new_cols[f'rv_{w}']   = rv
+        new_cols[f'bpv_{w}']  = bpv
+        new_cols[f'jump_{w}'] = np.maximum(0, rv - bpv)
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def return_autocorrelation(df: pd.DataFrame, lags: list = [1, 2, 3, 5, 10]) -> pd.DataFrame:
-    """
-    Rolling autocorrelation of returns at various lags.
-    Negative autocorrelation → mean reversion; Positive → momentum.
-    """
-    # In-place — no df.copy()
-    if 'returns' not in df.columns:
-        df['returns'] = df['close'].pct_change()
-
     from ..utils.fast_math import rolling_autocorr_nb
-    returns_arr = df['returns'].to_numpy(dtype=np.float64)
+    if 'returns' in df.columns:
+        returns_arr = df['returns'].to_numpy(dtype=np.float64)
+    else:
+        returns_arr = df['close'].pct_change().to_numpy(dtype=np.float64)
+    new_cols = {}
     for lag in lags:
-        df[f'autocorr_{lag}'] = rolling_autocorr_nb(returns_arr, window=60, lag=lag)
-
-    return df
+        new_cols[f'autocorr_{lag}'] = rolling_autocorr_nb(returns_arr, window=60, lag=lag)
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def intraday_seasonality(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Time-of-day and day-of-week features for intraday seasonality.
-    """
-    # In-place — no df.copy()
     idx = df.index
-    df['hour']        = idx.hour
-    df['minute']      = idx.minute
-    df['day_of_week'] = idx.dayofweek
-    df['is_weekend']  = (idx.dayofweek >= 5).astype(np.int8)
-
-    df['hour_sin']   = np.sin(2 * np.pi * df['hour'] / 24)
-    df['hour_cos']   = np.cos(2 * np.pi * df['hour'] / 24)
-    df['dow_sin']    = np.sin(2 * np.pi * df['day_of_week'] / 7)
-    df['dow_cos']    = np.cos(2 * np.pi * df['day_of_week'] / 7)
-    df['minute_sin'] = np.sin(2 * np.pi * df['minute'] / 60)
-    df['minute_cos'] = np.cos(2 * np.pi * df['minute'] / 60)
-
-    return df
+    hour = idx.hour
+    minute = idx.minute
+    dow = idx.dayofweek
+    new_cols = {
+        'hour':        hour,
+        'minute':      minute,
+        'day_of_week': dow,
+        'is_weekend':  (dow >= 5).astype(np.int8),
+        'hour_sin':    np.sin(2 * np.pi * hour / 24),
+        'hour_cos':    np.cos(2 * np.pi * hour / 24),
+        'dow_sin':     np.sin(2 * np.pi * dow / 7),
+        'dow_cos':     np.cos(2 * np.pi * dow / 7),
+        'minute_sin':  np.sin(2 * np.pi * minute / 60),
+        'minute_cos':  np.cos(2 * np.pi * minute / 60),
+    }
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 def generate_all_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Master function: apply all microstructure feature groups in-place."""
+    """Master function: apply all microstructure feature groups."""
     logger.info("Generating microstructure features...")
     df = order_flow_imbalance(df)
     df = trade_imbalance_proxy(df)
