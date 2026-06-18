@@ -1,8 +1,9 @@
 """
 scripts/prepare_data.py
 ========================
-Combine Binance Vision monthly CSVs (Jun 2025 - May 2026) + Hyperliquid
-recent data into a single clean 365-day parquet file for backtesting.
+Combine Binance Vision monthly CSVs + Hyperliquid recent data into a
+single clean parquet file for backtesting. Covers whatever months are
+present in data/raw/ (default: 5 years = 60 monthly files).
 
 Binance Vision timestamps may be microseconds (16 digits) or milliseconds (13 digits).
 """
@@ -22,17 +23,11 @@ RAW = Path('/home/ubuntu/AIQuant/data/raw')
 dfs = []
 
 # ── Binance Vision monthly CSVs ───────────────────────────────────────────────
-# Include all months from Jun 2025 through May 2026
-months = [
-    '2025-06','2025-07','2025-08','2025-09','2025-10','2025-11',
-    '2025-12','2026-01','2026-02','2026-03','2026-04','2026-05'
-]
+# Auto-discover all downloaded monthly CSV files (sorted chronologically)
+csv_files = sorted(RAW.glob('BTCUSDT-1m-????-??.csv'))
+print(f"  Found {len(csv_files)} monthly CSV files")
 
-for ym in months:
-    f = RAW / f'BTCUSDT-1m-{ym}.csv'
-    if not f.exists():
-        print(f"  ✗ Missing: {f.name} (skipped)")
-        continue
+for f in csv_files:
     df = pd.read_csv(f, header=None, names=COLS, dtype=str)
     ts = df['open_time'].astype(np.int64)
     # Auto-detect microseconds vs milliseconds
@@ -56,7 +51,7 @@ if hl_path.exists():
     dfs.append(hl)
 
 if not dfs:
-    print("ERROR: No data files found. Run fetch_hl_data.py first.")
+    print("ERROR: No data files found. Download monthly CSVs from Binance Vision first.")
     sys.exit(1)
 
 # ── Combine ───────────────────────────────────────────────────────────────────

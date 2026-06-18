@@ -39,14 +39,16 @@ cells.append(md("""# AIQuant — HFT Statistical Arbitrage
 | 1 | Clone repository |
 | 2 | Install dependencies + verify GPU |
 | 3 | Configuration |
-| 4 | Download 365-day Binance Vision dataset (12 monthly CSVs) |
+| 4 | Download Binance Vision dataset (auto-scales with DAYS setting) |
 | 5 | GPU Feature Engineering (CuPy + Numba parallel) |
 | 6 | ML Ensemble Backtest (XGBoost + LightGBM + LSTM, walk-forward CV) |
 | 7 | View results chart |
 | 8 | Live Trading (Hyperliquid mainnet) |
 | 9 | Download results |
 
-**Validated results on 365 days of real BTCUSD 1m data (Jun 2025 – Jun 2026):**
+**Default: 5 years of BTCUSDT 1m data (Jan 2021 – Jun 2026 · ~2.63M bars)**
+
+Validated on 365-day window (Jun 2025 – Jun 2026):
 
 | Metric | Value |
 |--------|-------|
@@ -148,7 +150,7 @@ os.chdir('/content/AIQuant')
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 PAIR                    = 'BTCUSDT'   # Trading pair
-DAYS                    = 365         # Days of backtest data (365 = full year)
+DAYS                    = 1825        # Days of backtest data (1825 = 5 years, max ~3285 = 9 years)
 INITIAL_CAPITAL         = 100_000     # Starting capital (USD)
 HYPERLIQUID_PRIVATE_KEY = ''          # Your Hyperliquid private key (for live trading)
 FAST_MODE               = False       # True = skip LSTM (~3x faster, slightly lower Sharpe)

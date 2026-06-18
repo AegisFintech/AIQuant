@@ -4,7 +4,7 @@ AIQuant — HFT Statistical Arbitrage Framework
 AegisFintech | Apache 2.0 License
 
 Usage:
-    python3 run.py backtest                          # BTC, last 365 days
+    python3 run.py backtest                          # BTC, last 1825 days (5 years)
     python3 run.py backtest --pair ETHUSDT           # different pair
     python3 run.py backtest --days 30                # shorter window
     python3 run.py backtest --pair ETH --days 60     # pair shorthand works too
@@ -12,7 +12,7 @@ Usage:
 
 Defaults (when no flags given):
     --pair   BTCUSDT
-    --days   365  (T-365 days of 1m data = 525,600 bars)
+    --days   1825  (T-1825 days of 1m data = ~2.6M bars)
 
 Data sources:
     Backtest : Binance Vision monthly CSVs (free, no API key) + Hyperliquid public API
@@ -120,7 +120,7 @@ def normalise_pair(raw: str) -> str:
 # DATA LOADING — Binance Vision + Hyperliquid
 # ════════════════════════════════════════════════════════════════════════════
 
-def load_data(pair: str = 'BTCUSDT', days: int = 365) -> pd.DataFrame:
+def load_data(pair: str = 'BTCUSDT', days: int = 1825) -> pd.DataFrame:
     """
     Load 1m OHLCV data from the pre-built parquet dataset.
     If the parquet doesn't exist, runs prepare_data.py to build it.
@@ -141,7 +141,7 @@ def load_data(pair: str = 'BTCUSDT', days: int = 365) -> pd.DataFrame:
     df = pd.read_parquet(parquet_path)
 
     # Trim to requested window
-    if days < 365:
+    if days < 1825:
         cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=days)
         df = df[df.index >= cutoff]
 
@@ -769,7 +769,7 @@ def _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask):
 
         fig = plt.figure(figsize=(18, 12), facecolor='#0d1117')
         fig.suptitle(
-            f"AIQuant  ·  ML Ensemble (XGB+LGB+LSTM)  ·  {pair}  ·  365-Day Backtest\n"
+            f"AIQuant  ·  ML Ensemble (XGB+LGB+LSTM)  ·  {pair}  ·  {days}-Day Backtest\n"
             f"Sharpe {best_r['sharpe']:+.3f}  |  Return {best_r['ret']:+.1f}%  |  "
             f"MaxDD {best_r['max_dd']:.1f}%  |  Calmar {best_r['calmar']:.3f}  |  "
             f"{best_r['trades']:,} trades  |  {best_r['win_rate']:.1f}% win rate  |  "
@@ -939,8 +939,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 run.py backtest                      # BTC, last 365 days
-  python3 run.py backtest --pair ETH           # Ethereum, last 365 days
+  python3 run.py backtest                      # BTC, last 1825 days (5 years)
+  python3 run.py backtest --pair ETH           # Ethereum, last 1825 days (5 years)
   python3 run.py backtest --days 30            # BTC, last 30 days
   python3 run.py backtest --pair SOL --days 60 # Solana, last 60 days
   python3 run.py backtest --fast               # Skip LSTM (faster, ~3x speedup)
@@ -955,7 +955,7 @@ Examples:
     # ── backtest ──────────────────────────────────────────────────────────
     bt_p = sub.add_parser('backtest', help='Run ML ensemble backtest on Binance Vision data')
     bt_p.add_argument('--pair',    default='BTCUSDT', help='Trading pair (default: BTCUSDT)')
-    bt_p.add_argument('--days',    default=365, type=int, help='Days of history (default: 365)')
+    bt_p.add_argument('--days',    default=1825, type=int, help='Days of history (default: 1825 = 5 years)')
     bt_p.add_argument('--capital', default=100_000, type=float, help='Starting capital USD (default: 100000)')
     bt_p.add_argument('--force',   action='store_true', help='Force re-download even if cache exists')
     bt_p.add_argument('--fast',    action='store_true', help='Skip LSTM training (faster, ~3x speedup)')
