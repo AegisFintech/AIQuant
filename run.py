@@ -564,11 +564,132 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         'long_thresh':   best_r['long_thresh'],
         'short_thresh':  best_r['short_thresh'],
         'top_features':  top_features,
+        'lstm_features': top_features[:20],
+        'lstm_seq_len':  30,
         'results':       {k: v for k, v in best_r.items()
                           if k not in ('equity', 'signals')},
     }
     with open(CONFIG_DIR / 'ml_best_params.json', 'w') as f:
         json.dump(params, f, indent=2)
+
+    # ── Save trained models to disk (for live trading) ───────────────────────
+    try:
+        import joblib
+        MODELS_DIR = ROOT / 'models'
+        MODELS_DIR.mkdir(exist_ok=True)
+
+        # Re-train XGB + LGB on the LAST fold (most recent 30 days)
+        # This is the model that will be used for live trading
+        last_tr_start, last_tr_end, _ = folds[-1]
+        tr_mask_live = valid_mask[last_tr_start:last_tr_end]
+        tr_idx_live  = np.arange(last_tr_start, last_tr_end)[tr_mask_live]
+        X_live       = X_sel[tr_idx_live]
+        y_live       = encode_labels(labels[tr_idx_live])
+        scaler_live  = RobustScaler()
+        X_live_s     = scaler_live.fit_transform(X_live)
+        flat_frac_l  = (y_live == 1).mean()
+        w_flat_l     = 1.0 / (flat_frac_l + 1e-10)
+        w_dir_l      = 1.0 / ((1 - flat_frac_l) / 2 + 1e-10)
+        sw_live      = np.where(y_live == 1, w_flat_l, w_dir_l)
+
+        xgb_live = xgb.XGBClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, min_child_weight=10,
+            gamma=0.1, reg_alpha=0.1, reg_lambda=1.0,
+            objective='multi:softprob', num_class=3,
+            eval_metric='mlogloss', random_state=42, verbosity=0,
+            use_label_encoder=False,
+            tree_method='hist', device=_xgb_device,
+        )
+        xgb_live.fit(X_live_s, y_live, sample_weight=sw_live)
+
+        lgb_live = lgb.LGBMClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.05,
+            num_leaves=31, subsample=0.8, colsample_bytree=0.8,
+            min_child_samples=20, reg_alpha=0.1, reg_lambda=1.0,
+            class_weight='balanced', random_state=42, verbose=-1,
+            device='gpu' if _ml_device == 'cuda' else 'cpu',
+        )
+        lgb_live.fit(X_live_s, y_live, sample_weight=sw_live)
+
+        # Bundle: models + scaler + feature list
+        bundle = {
+            'xgb':          xgb_live,
+            'lgb':          lgb_live,
+            'scaler':       scaler_live,
+            'top_features': top_features,
+            'lstm_features': top_features[:20],
+            'lstm_seq_len': 30,
+            'long_thresh':  best_r['long_thresh'],
+            'short_thresh': best_r['short_thresh'],
+            'lstm_state':   None,   # filled below if LSTM available
+            'trained_at':   datetime.now().isoformat(),
+            'pair':         pair,
+        }
+
+        # Save LSTM state dict if available
+        if LSTM_AVAILABLE:
+            try:
+                import torch
+                import torch.nn as nn
+                DEVICE_LIVE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                SEQ_LEN_L   = 30
+                LSTM_FEATS_L = 20
+                lstm_feats_l = top_features[:LSTM_FEATS_L]
+                X_lstm_l     = df[lstm_feats_l].to_numpy(np.float64)
+                X_lstm_l     = np.nan_to_num(X_lstm_l, nan=0.0, posinf=0.0, neginf=0.0)
+
+                class _LSTMAttn(nn.Module):
+                    def __init__(self, input_size, hidden=64, n_layers=2, n_classes=3):
+                        super().__init__()
+                        self.lstm = nn.LSTM(input_size, hidden, n_layers,
+                                            batch_first=True, dropout=0.2)
+                        self.attn = nn.Linear(hidden, 1)
+                        self.fc   = nn.Sequential(
+                            nn.Linear(hidden, 32), nn.ReLU(),
+                            nn.Dropout(0.2), nn.Linear(32, n_classes)
+                        )
+                    def forward(self, x):
+                        out, _ = self.lstm(x)
+                        attn_w = torch.softmax(self.attn(out), dim=1)
+                        ctx    = (out * attn_w).sum(dim=1)
+                        return self.fc(ctx)
+
+                from torch.utils.data import DataLoader, TensorDataset
+                tr_seqs_l, tr_labs_l = [], []
+                for i in range(last_tr_start + SEQ_LEN_L, last_tr_end):
+                    if not valid_mask[i]: continue
+                    tr_seqs_l.append(X_lstm_l[i-SEQ_LEN_L:i])
+                    tr_labs_l.append(encode_labels(labels[i]))
+
+                if len(tr_seqs_l) >= 100:
+                    X_tr_tl = torch.tensor(np.array(tr_seqs_l), dtype=torch.float32).to(DEVICE_LIVE)
+                    y_tr_tl = torch.tensor(tr_labs_l, dtype=torch.long).to(DEVICE_LIVE)
+                    fm_l    = X_tr_tl.mean(dim=(0,1), keepdim=True)
+                    fs_l    = X_tr_tl.std(dim=(0,1), keepdim=True) + 1e-8
+                    X_tr_tl = (X_tr_tl - fm_l) / fs_l
+                    ds_l    = TensorDataset(X_tr_tl, y_tr_tl)
+                    ld_l    = DataLoader(ds_l, batch_size=512, shuffle=True)
+                    lstm_model_live = _LSTMAttn(LSTM_FEATS_L).to(DEVICE_LIVE)
+                    opt_l   = torch.optim.Adam(lstm_model_live.parameters(), lr=1e-3)
+                    loss_fn_l = nn.CrossEntropyLoss()
+                    for _ in range(5):
+                        for xb, yb in ld_l:
+                            opt_l.zero_grad()
+                            loss_fn_l(lstm_model_live(xb), yb).backward()
+                            opt_l.step()
+                    bundle['lstm_state']    = lstm_model_live.cpu().state_dict()
+                    bundle['lstm_feat_mean'] = fm_l.cpu().numpy()
+                    bundle['lstm_feat_std']  = fs_l.cpu().numpy()
+            except Exception as _e:
+                print(f"  {YELLOW('⚠')} LSTM save skipped: {_e}")
+
+        joblib.dump(bundle, MODELS_DIR / 'ml_live_bundle.pkl')
+        bundle_size = (MODELS_DIR / 'ml_live_bundle.pkl').stat().st_size / 1e6
+        print(f"  {GREEN('✓')} Live model bundle saved → models/ml_live_bundle.pkl  ({bundle_size:.1f} MB)")
+        print(f"  {DIM('  Contains: XGBoost + LightGBM + scaler + features + thresholds' + (' + LSTM' if bundle['lstm_state'] is not None else ''))}")
+    except Exception as _e:
+        print(f"  {YELLOW('⚠')} Model save failed: {_e}")
 
     # ── Print results table ──────────────────────────────────────────────────
     col = GREEN if best_r['ret'] >= 0 else RED
@@ -714,8 +835,48 @@ def _save_ml_chart(df, best_r, pair, capital, ens_score, oos_mask):
 # LIVE TRADING — Hyperliquid Mainnet
 # ════════════════════════════════════════════════════════════════════════════
 
+def run_live_ml(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60.0):
+    """
+    Start ML-powered live trading on Hyperliquid mainnet.
+    Loads the model bundle saved by 'python3 run.py backtest'.
+    """
+    bundle_path = ROOT / 'models' / 'ml_live_bundle.pkl'
+    if not bundle_path.exists():
+        print(f"\n  {RED('✗')}  Model bundle not found at models/ml_live_bundle.pkl")
+        print(f"  {YELLOW('!')}  Run 'python3 run.py backtest' first to train and save the model.")
+        sys.exit(1)
+
+    from dotenv import load_dotenv
+    load_dotenv()
+    pk = os.getenv('HYPERLIQUID_PRIVATE_KEY', '')
+    if not pk or pk.startswith('your_'):
+        print(f"\n  {RED('✗')}  HYPERLIQUID_PRIVATE_KEY not set in .env")
+        print(f"  {DIM('  1. Open .env and add your Hyperliquid private key')}")
+        print(f"  {DIM('  2. Generate a wallet: python3 -c \"from eth_account import Account; a=Account.create(); print(a.key.hex())\"')}")
+        print(f"  {DIM('  3. Fund your account at https://app.hyperliquid.xyz')}")
+        sys.exit(1)
+
+    print(f"  {GREEN('✓')} Model bundle found: {bundle_path.name}")
+    print(f"  {GREEN('✓')} Private key loaded")
+    print(f"  {CYAN('▶')}  Starting ML live trading loop  (Ctrl+C to stop)")
+    print(f"  {DIM('  Polling every ' + str(poll) + 's  ·  Max 25% position per trade')}")
+    print(f"  {DIM('  Signals: XGBoost 40% + LightGBM 40% + LSTM 20%')}")
+    print()
+
+    from aiquant.execution.ml_live_trader import MLLiveTrader
+    trader = MLLiveTrader(
+        pair              = pair,
+        initial_capital   = capital,
+        kelly_fraction    = 0.5,
+        poll_interval_sec = poll,
+        feature_window    = 600,
+        log_dir           = str(LOGS_DIR / 'ml_live'),
+    )
+    trader.start()
+
+
 def run_live(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60.0):
-    """Start live trading on Hyperliquid mainnet."""
+    """Start live trading on Hyperliquid mainnet (rule-based fallback)."""
     from dotenv import load_dotenv
     load_dotenv()
 
@@ -729,8 +890,9 @@ def run_live(pair: str = 'BTCUSDT', capital: float = 10_000, poll: float = 60.0)
 
     coin = pair.replace('USDT', '')
     print(f"  {GREEN('✓')} Private key loaded")
-    print(f"  {CYAN('▶')}  Starting live trading loop  (Ctrl+C to stop)")
+    print(f"  {CYAN('▶')}  Starting live trading loop  (rule-based mode)  (Ctrl+C to stop)")
     print(f"  {DIM('  Polling every ' + str(poll) + 's  ·  Max 25% position per trade')}")
+    print(f"  {YELLOW('!')}  Tip: run with --ml to use the trained ML ensemble instead")
     print()
 
     from aiquant.execution.live_trader import LiveTradingOrchestrator
@@ -761,8 +923,10 @@ Examples:
   python3 run.py backtest --days 30            # BTC, last 30 days
   python3 run.py backtest --pair SOL --days 60 # Solana, last 60 days
   python3 run.py backtest --fast               # Skip LSTM (faster, ~3x speedup)
-  python3 run.py live                          # Live trading on Hyperliquid
-  python3 run.py live --pair ETH --poll 30     # ETH, poll every 30s
+  python3 run.py live --ml                     # ML live trading (after backtest)
+  python3 run.py live --ml --pair ETH          # ETH with ML signals
+  python3 run.py live --ml --poll 30           # ML mode, poll every 30s
+  python3 run.py live                          # Rule-based live trading (fallback)
         """
     )
     sub = parser.add_subparsers(dest='mode', required=True)
@@ -780,6 +944,8 @@ Examples:
     lv_p.add_argument('--pair',    default='BTCUSDT', help='Trading pair (default: BTCUSDT)')
     lv_p.add_argument('--capital', default=10_000, type=float, help='Starting capital USD (default: 10000)')
     lv_p.add_argument('--poll',    default=60.0, type=float, help='Poll interval in seconds (default: 60)')
+    lv_p.add_argument('--ml',      action='store_true',
+                      help='Use trained ML ensemble (requires models/ml_live_bundle.pkl from backtest)')
 
     args = parser.parse_args()
     pair = normalise_pair(args.pair)
@@ -814,11 +980,18 @@ Examples:
         elapsed = time.time() - t0
         print(f"\n  {DIM(f'Total time: {elapsed:.1f}s  ({elapsed/60:.1f} min)')}")
         print(f"  {DIM('Best params saved → config/ml_best_params.json')}")
+        print(f"  {DIM('Model bundle saved → models/ml_live_bundle.pkl')}")
         print(f"  {DIM('Chart saved → results/backtest_results.png')}")
+        print(f"\n  {GREEN('✓')} Ready to trade! Run: {BOLD('python3 run.py live --ml')}")
+        print(f"  {DIM('  (set HYPERLIQUID_PRIVATE_KEY in .env first)')}")
+        print()
 
     elif args.mode == 'live':
         banner('live', pair)
-        run_live(pair=pair, capital=args.capital, poll=args.poll)
+        if args.ml:
+            run_live_ml(pair=pair, capital=args.capital, poll=args.poll)
+        else:
+            run_live(pair=pair, capital=args.capital, poll=args.poll)
 
 
 if __name__ == '__main__':

@@ -384,38 +384,72 @@ else:
     print('No chart found — run Step 6 first')"""))
 
 # ── Step 8: Live trading ──────────────────────────────────────────────────────
-cells.append(md("""## Step 8 — Live Trading on Hyperliquid Mainnet
+cells.append(md("""## Step 8 — Live Trading on Hyperliquid Mainnet (ML Mode)
 
-Requires `HYPERLIQUID_PRIVATE_KEY` set in Step 3.
-The live trading loop fetches real-time bars from Hyperliquid, generates ML signals,
-and places orders on Hyperliquid mainnet.
+Requires `HYPERLIQUID_PRIVATE_KEY` set in Step 3 **and** Step 6 completed (backtest must have run to save the model bundle).
+
+The ML live trading loop:
+1. Loads the trained model bundle (`models/ml_live_bundle.pkl`) saved by Step 6
+2. Every 60 seconds: fetches the latest 600 bars from Hyperliquid
+3. Builds all 183 features on the live data
+4. Runs XGBoost + LightGBM + LSTM → ensemble confidence score
+5. Applies the optimised thresholds → LONG / SHORT / FLAT signal
+6. Sizes position with half-Kelly (max 25% of portfolio per trade)
+7. Executes on Hyperliquid mainnet
 
 **To generate a new wallet:**
 ```python
 from eth_account import Account
 a = Account.create()
 print(a.key.hex())   # private key — fund this address on Hyperliquid
-```"""))
-cells.append(code("""if not HYPERLIQUID_PRIVATE_KEY:
+```
+
+> Press the **stop button (■)** in Colab to halt the trading loop gracefully."""))
+cells.append(code("""import subprocess, sys, os, time
+
+if not HYPERLIQUID_PRIVATE_KEY:
     print('⚠  No HYPERLIQUID_PRIVATE_KEY set in Step 3.')
     print('   Set your key and re-run Step 3, then run this cell.')
     print()
     print('   To generate a new wallet:')
-    print('   from eth_account import Account')
-    print('   a = Account.create()')
-    print('   print(a.key.hex())')
+    print('   from eth_account import Account; a = Account.create(); print(a.key.hex())')
 else:
-    import subprocess, sys
-    print('Starting live trading on Hyperliquid mainnet...')
-    print('Press the stop button (■) in Colab to halt the trading loop.')
-    result = subprocess.run(
-        [sys.executable, 'run.py', 'live',
-         '--pair', PAIR, '--capital', str(INITIAL_CAPITAL)],
-        capture_output=False,
-        text=True,
-        cwd='/content/AIQuant',
-        timeout=86400,   # 24 hour max
-    )"""))
+    from pathlib import Path
+    bundle = Path('/content/AIQuant/models/ml_live_bundle.pkl')
+    if not bundle.exists():
+        print('⚠  Model bundle not found. Run Step 6 (backtest) first to train and save the model.')
+    else:
+        import joblib
+        b = joblib.load(bundle)
+        print(f'Model bundle loaded:')
+        print(f'  Trained at    : {b.get("trained_at", "unknown")}')
+        print(f'  Pair          : {b.get("pair", "unknown")}')
+        print(f'  Long threshold: {b.get("long_thresh")}')
+        print(f'  Short threshold:{b.get("short_thresh")}')
+        print(f'  LSTM available: {"yes" if b.get("lstm_state") is not None else "no"}')
+        print()
+        print('Starting ML live trading on Hyperliquid mainnet...')
+        print('Press the stop button (■) in Colab to halt the trading loop.')
+        print()
+
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        env['HYPERLIQUID_PRIVATE_KEY'] = HYPERLIQUID_PRIVATE_KEY
+
+        # Stream output line-by-line so every tick prints immediately
+        with subprocess.Popen(
+            [sys.executable, '-u', 'run.py', 'live', '--ml',
+             '--pair', PAIR, '--capital', str(INITIAL_CAPITAL)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd='/content/AIQuant',
+            env=env,
+        ) as proc:
+            for line in proc.stdout:
+                print(line, end='', flush=True)
+            proc.wait()"""))
 
 # ── Step 9: Download results ──────────────────────────────────────────────────
 cells.append(md("## Step 9 — Download Results"))
@@ -435,7 +469,13 @@ if params.exists():
     files.download(str(params))
     print(f'✓ Downloaded: {params.name}')
 
-# Download trade logs
+# Download model bundle (for use outside Colab)
+bundle = Path('/content/AIQuant/models/ml_live_bundle.pkl')
+if bundle.exists():
+    files.download(str(bundle))
+    print(f'✓ Downloaded: {bundle.name}')
+
+# Download all trade logs (backtest + live)
 for log_file in glob.glob('/content/AIQuant/logs/**/*.json', recursive=True):
     files.download(log_file)
     print(f'✓ Downloaded: {Path(log_file).name}')
