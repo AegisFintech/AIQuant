@@ -278,8 +278,23 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     print(f"  {GREEN('✓')} {len(folds)} folds  "
           f"(train={TRAIN_BARS//1440}d, test={TEST_BARS//1440}d, step={STEP_BARS//1440}d)")
 
-    # ── XGBoost + LightGBM training ──────────────────────────────────────────
+    # ── GPU detection for ML ────────────────────────────────────────────────────
+    try:
+        import torch as _torch
+        _ml_device = 'cuda' if _torch.cuda.is_available() else 'cpu'
+        _gpu_name  = _torch.cuda.get_device_name(0) if _ml_device == 'cuda' else 'CPU'
+    except Exception:
+        _ml_device = 'cpu'
+        _gpu_name  = 'CPU'
+
+    # XGBoost GPU tree method
+    _xgb_tree_method = 'hist'
+    _xgb_device      = 'cuda' if _ml_device == 'cuda' else 'cpu'
+
     print(f"\n  {CYAN('⚙')}  [4/5] Training XGBoost + LightGBM (walk-forward)...")
+    print(f"  {DIM(f'  Device: {_gpu_name}  ·  XGBoost tree_method=hist device={_xgb_device}  ·  {len(folds)} folds')}")
+    print(f"  {DIM(f'  Each fold: ~43k train bars × 60 features  →  10k test bars')}")
+    print()
 
     oos_xgb  = np.zeros(n)
     oos_lgb  = np.zeros(n)
@@ -289,7 +304,11 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
     def encode_labels(y): return (y + 1).astype(int)
     def decode_labels(y): return (y - 1).astype(np.int8)
 
+    _xgb_fold_times = []
+    _t_xgb_start    = time.time()
+
     for fold_idx, (tr_start, tr_end, te_end) in enumerate(folds):
+        _t_fold = time.time()
         tr_mask = valid_mask[tr_start:tr_end]
         tr_idx  = np.arange(tr_start, tr_end)[tr_mask]
         X_tr    = X_sel[tr_idx]
@@ -311,6 +330,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             objective='multi:softprob', num_class=3,
             eval_metric='mlogloss', random_state=42, verbosity=0,
             use_label_encoder=False,
+            tree_method=_xgb_tree_method, device=_xgb_device,
         )
         xgb_model.fit(X_tr_s, y_tr, sample_weight=sample_wt)
         xgb_proba = xgb_model.predict_proba(X_te_s)
@@ -320,6 +340,7 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
             num_leaves=31, subsample=0.8, colsample_bytree=0.8,
             min_child_samples=20, reg_alpha=0.1, reg_lambda=1.0,
             class_weight='balanced', random_state=42, verbose=-1,
+            device='gpu' if _ml_device == 'cuda' else 'cpu',
         )
         lgb_model.fit(X_tr_s, y_tr, sample_weight=sample_wt)
         lgb_proba = lgb_model.predict_proba(X_te_s)
@@ -328,10 +349,21 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
         oos_lgb[te_idx]  = lgb_proba[:, 2] - lgb_proba[:, 0]
         oos_mask[te_idx] = True
 
-        if (fold_idx + 1) % 5 == 0 or fold_idx == len(folds) - 1:
-            print(f"  {DIM(f'  Fold {fold_idx+1}/{len(folds)} complete')}")
+        _fold_elapsed = time.time() - _t_fold
+        _xgb_fold_times.append(_fold_elapsed)
+        _avg_fold     = sum(_xgb_fold_times) / len(_xgb_fold_times)
+        _remaining    = _avg_fold * (len(folds) - fold_idx - 1)
+        _total_so_far = time.time() - _t_xgb_start
+        print(
+            f"  {DIM(f'  XGB+LGB Fold {fold_idx+1:>2}/{len(folds)}')}"
+            f"  {DIM(f'{_fold_elapsed:.1f}s/fold')}"
+            f"  {DIM(f'elapsed {_total_so_far:.0f}s')}"
+            f"  {CYAN(f'ETA ~{_remaining:.0f}s')}",
+            flush=True
+        )
 
-    print(f"  {GREEN('✓')} OOS coverage: {oos_mask.sum():,} bars ({oos_mask.mean()*100:.1f}%)")
+    print(f"  {GREEN('✓')} OOS coverage: {oos_mask.sum():,} bars ({oos_mask.mean()*100:.1f}%)"
+          f"  {DIM(f'  total {time.time()-_t_xgb_start:.0f}s')}")
 
     # ── LSTM training ────────────────────────────────────────────────────────
     oos_lstm       = np.zeros(n)
@@ -367,7 +399,13 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                     ctx    = (out * attn_w).sum(dim=1)
                     return self.fc(ctx)
 
+            _t_lstm_start  = time.time()
+            _lstm_fold_times = []
+            print(f"  {DIM(f'  Device: {DEVICE}  ·  SEQ_LEN={SEQ_LEN}  ·  {LSTM_FEATS} features  ·  5 epochs/fold  ·  {len(folds)} folds')}")
+            print()
+
             for fold_idx, (tr_start, tr_end, te_end) in enumerate(folds):
+                _t_lstm_fold = time.time()
                 tr_seqs, tr_labs = [], []
                 for i in range(tr_start + SEQ_LEN, tr_end):
                     if not valid_mask[i]: continue
@@ -389,12 +427,16 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                 loss_fn = nn.CrossEntropyLoss()
 
                 model.train()
+                epoch_losses = []
                 for epoch in range(5):
+                    ep_loss = 0.0
                     for xb, yb in loader:
                         opt.zero_grad()
                         loss = loss_fn(model(xb), yb)
                         loss.backward(); opt.step()
+                        ep_loss += loss.item()
                     sched.step()
+                    epoch_losses.append(ep_loss / max(len(loader), 1))
 
                 model.eval()
                 te_idx_list = list(range(tr_end + SEQ_LEN, te_end))
@@ -407,11 +449,24 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
                     for j, i in enumerate(te_idx_list):
                         oos_lstm[i] = proba[j, 2] - proba[j, 0]
 
-                if (fold_idx + 1) % 5 == 0 or fold_idx == len(folds) - 1:
-                    print(f"  {DIM(f'  LSTM Fold {fold_idx+1}/{len(folds)} complete')}")
+                _lstm_fold_elapsed = time.time() - _t_lstm_fold
+                _lstm_fold_times.append(_lstm_fold_elapsed)
+                _lstm_avg   = sum(_lstm_fold_times) / len(_lstm_fold_times)
+                _lstm_eta   = _lstm_avg * (len(folds) - fold_idx - 1)
+                _lstm_total = time.time() - _t_lstm_start
+                _loss_str   = f'loss={epoch_losses[-1]:.4f}' if epoch_losses else ''
+                print(
+                    f"  {DIM(f'  LSTM Fold {fold_idx+1:>2}/{len(folds)}')}"
+                    f"  {DIM(f'{_lstm_fold_elapsed:.1f}s/fold')}"
+                    f"  {DIM(_loss_str)}"
+                    f"  {DIM(f'elapsed {_lstm_total:.0f}s')}"
+                    f"  {CYAN(f'ETA ~{_lstm_eta:.0f}s')}",
+                    flush=True
+                )
 
             LSTM_AVAILABLE = True
-            print(f"  {GREEN('✓')} LSTM training complete  (device: {DEVICE})")
+            print(f"  {GREEN('✓')} LSTM training complete  "
+                  f"(device: {DEVICE}  ·  total {time.time()-_t_lstm_start:.0f}s)")
 
         except Exception as e:
             print(f"  {YELLOW('⚠')} LSTM skipped: {e}")
