@@ -263,20 +263,41 @@ def run_ml_backtest(df: pd.DataFrame, pair: str, capital: float = 100_000,
 
     # ── Walk-forward CV setup ────────────────────────────────────────────────
     print(f"\n  {CYAN('⚙')}  [3/5] Walk-forward cross-validation...")
-    TRAIN_BARS = 30 * 1440
-    TEST_BARS  = 7  * 1440
-    STEP_BARS  = 7  * 1440
 
-    folds = []
-    start = 0
-    while start + TRAIN_BARS + TEST_BARS <= n - FORWARD_BARS:
-        train_end = start + TRAIN_BARS
-        test_end  = train_end + TEST_BARS
-        folds.append((start, train_end, test_end))
-        start += STEP_BARS
+    # Dynamic fold sizing — targets ~50 folds regardless of dataset length.
+    # Training window : 1/6 of total days, clamped to [7d, 90d]
+    # Test/step window: sized so total folds ≈ 50, clamped to [1d, 30d]
+    # Fallback to fixed 30d/7d if fewer than 10 folds would result.
+    BARS_PER_DAY = 1440
+    TARGET_FOLDS = 50
+    total_usable = n - FORWARD_BARS
+    days_total   = total_usable / BARS_PER_DAY
+
+    train_days = max(7, min(90, int(days_total / 6)))
+    TRAIN_BARS = train_days * BARS_PER_DAY
+    step_days  = max(1, min(30, int((days_total - train_days) / TARGET_FOLDS)))
+    TEST_BARS  = step_days * BARS_PER_DAY
+    STEP_BARS  = TEST_BARS
+
+    def _build_folds(n_bars, train_b, test_b, step_b, fwd):
+        fs, s = [], 0
+        while s + train_b + test_b <= n_bars - fwd:
+            fs.append((s, s + train_b, s + train_b + test_b))
+            s += step_b
+        return fs
+
+    folds = _build_folds(n, TRAIN_BARS, TEST_BARS, STEP_BARS, FORWARD_BARS)
+
+    # Fallback: if dynamic sizing produced fewer than 10 folds use fixed defaults
+    if len(folds) < 10:
+        train_days, step_days = 30, 7
+        TRAIN_BARS = train_days * BARS_PER_DAY
+        TEST_BARS  = step_days  * BARS_PER_DAY
+        STEP_BARS  = TEST_BARS
+        folds = _build_folds(n, TRAIN_BARS, TEST_BARS, STEP_BARS, FORWARD_BARS)
 
     print(f"  {GREEN('✓')} {len(folds)} folds  "
-          f"(train={TRAIN_BARS//1440}d, test={TEST_BARS//1440}d, step={STEP_BARS//1440}d)")
+          f"(train={train_days}d · test/step={step_days}d · dataset={days_total:.0f}d)")
 
     # ── GPU detection for ML ────────────────────────────────────────────────────
     try:
