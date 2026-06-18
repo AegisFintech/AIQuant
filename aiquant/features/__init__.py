@@ -4,6 +4,7 @@ aiquant/features/__init__.py
 Feature engineering pipeline with verbose, timed progress output.
 """
 
+import gc
 import time
 import platform
 import numpy as np
@@ -83,16 +84,19 @@ def build_full_feature_set(df, verbose: bool = True) -> "pd.DataFrame":
     if verbose:
         print(f"    {_CYAN('⚙')}  Technical indicators ...", end='\r')
     df = _step("Technical indicators", generate_all_technical_features, df, n_bars)
+    gc.collect()
 
     # ── Stage 2: Microstructure ───────────────────────────────────────────
     if verbose:
         print(f"    {_CYAN('⚙')}  Microstructure ...", end='\r')
     df = _step("Microstructure", generate_all_microstructure_features, df, n_bars)
+    gc.collect()
 
     # ── Stage 3: StatArb ──────────────────────────────────────────────────
     if verbose:
         print(f"    {_CYAN('⚙')}  StatArb / regime ...", end='\r')
     df = _step("StatArb / regime", generate_all_statarb_features, df, n_bars)
+    gc.collect()
 
     # ── Drop NaN warmup rows ──────────────────────────────────────────────
     n_before = len(df)
