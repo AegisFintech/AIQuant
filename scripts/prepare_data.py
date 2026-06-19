@@ -60,13 +60,29 @@ def _parse_csv(path: Path) -> pd.DataFrame:
     return df[['open', 'high', 'low', 'close', 'volume']]
 
 
+import re as _re
+_MONTHLY_PAT = _re.compile(r'^BTCUSDT-1m-\d{4}-\d{2}\.zip$')
+
 def _find_local_zips() -> list:
-    """Search data/ and data/raw/ for any .zip file that may contain BTCUSDT CSVs.
-    Accepts any filename — e.g. 21.zip, 22.zip, BTCUSDT_1m_2021.zip, etc.
+    """Search data/ and data/raw/ for bundle zip files that contain BTCUSDT CSVs.
+    Accepts any filename (21.zip, 22.zip, BTCUSDT_1m_2021.zip, etc.).
+    Skips per-month Binance Vision zips (BTCUSDT-1m-YYYY-MM.zip) since those
+    are intermediate download artifacts, not user-supplied bundles.
     """
     zips = []
     for d in [DATA, RAW_DIR]:
-        zips += sorted(d.glob('*.zip'))
+        for z in sorted(d.glob('*.zip')):
+            # Skip per-month Binance Vision zips (already extracted)
+            if _MONTHLY_PAT.match(z.name):
+                continue
+            # Skip files too small to be a real bundle (< 100 KB)
+            if z.stat().st_size < 100_000:
+                continue
+            # Verify it is actually a valid zip before adding
+            if not zipfile.is_zipfile(z):
+                print(f"  ⚠  Skipping {z.name} — not a valid zip file")
+                continue
+            zips.append(z)
     # Deduplicate by resolved path
     seen = set()
     result = []
