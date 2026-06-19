@@ -83,23 +83,16 @@ def _statarb_chunked(df, verbose: bool = True):
     gc.collect()
 
     # Pre-allocate output arrays for new columns.
-    # Detect dtype from probe: string/object columns get object arrays,
-    # numeric columns get float32 arrays.
-    probe2     = df.iloc[:1000].copy()
-    probe2_out = generate_all_statarb_features(probe2)
-    col_dtypes = {}
-    for col in new_cols:
-        if col in probe2_out.columns:
-            dt = probe2_out[col].dtype
-            col_dtypes[col] = object if dt == object or str(dt) == 'object' else np.float32
-        else:
-            col_dtypes[col] = np.float32
-    del probe2, probe2_out
-    gc.collect()
+    # String/object columns are identified by name — do NOT rely on probe dtype
+    # inference because rolling-window columns may be all-NaN in the probe rows,
+    # causing pandas to infer float64 even for string columns like 'regime'.
+    # Any column whose name appears in KNOWN_STRING_COLS gets an object array;
+    # everything else gets float32.
+    KNOWN_STRING_COLS = {'regime', 'regime_label', 'market_state', 'trend_state'}
 
     new_col_arrays = {}
     for col in new_cols:
-        if col_dtypes[col] == object:
+        if col in KNOWN_STRING_COLS:
             new_col_arrays[col] = np.full(n, None, dtype=object)
         else:
             new_col_arrays[col] = np.full(n, np.nan, dtype=np.float32)
