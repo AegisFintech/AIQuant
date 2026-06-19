@@ -61,11 +61,21 @@ def _parse_csv(path: Path) -> pd.DataFrame:
 
 
 def _find_local_zips() -> list:
-    """Search data/ and data/raw/ for BTCUSDT*.zip files."""
+    """Search data/ and data/raw/ for any .zip file that may contain BTCUSDT CSVs.
+    Accepts any filename — e.g. 21.zip, 22.zip, BTCUSDT_1m_2021.zip, etc.
+    """
     zips = []
     for d in [DATA, RAW_DIR]:
-        zips += sorted(d.glob('BTCUSDT*.zip')) + sorted(d.glob('btcusdt*.zip'))
-    return zips
+        zips += sorted(d.glob('*.zip'))
+    # Deduplicate by resolved path
+    seen = set()
+    result = []
+    for z in zips:
+        rp = z.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            result.append(z)
+    return result
 
 
 def _extract_zip(zip_path: Path) -> int:
