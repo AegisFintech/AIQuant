@@ -82,8 +82,27 @@ def _statarb_chunked(df, verbose: bool = True):
     del probe, probe_out
     gc.collect()
 
-    # Pre-allocate output arrays for new columns
-    new_col_arrays = {col: np.full(n, np.nan, dtype=np.float64) for col in new_cols}
+    # Pre-allocate output arrays for new columns.
+    # Detect dtype from probe: string/object columns get object arrays,
+    # numeric columns get float32 arrays.
+    probe2     = df.iloc[:1000].copy()
+    probe2_out = generate_all_statarb_features(probe2)
+    col_dtypes = {}
+    for col in new_cols:
+        if col in probe2_out.columns:
+            dt = probe2_out[col].dtype
+            col_dtypes[col] = object if dt == object or str(dt) == 'object' else np.float32
+        else:
+            col_dtypes[col] = np.float32
+    del probe2, probe2_out
+    gc.collect()
+
+    new_col_arrays = {}
+    for col in new_cols:
+        if col_dtypes[col] == object:
+            new_col_arrays[col] = np.full(n, None, dtype=object)
+        else:
+            new_col_arrays[col] = np.full(n, np.nan, dtype=np.float32)
 
     chunk_starts = list(range(0, n, CHUNK_SIZE))
     n_chunks     = len(chunk_starts)
