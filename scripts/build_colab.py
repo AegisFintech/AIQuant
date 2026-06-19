@@ -169,8 +169,130 @@ print(f'  Fast mode (skip LSTM): {FAST_MODE}')
 print(f'  Hyperliquid live trading: {\"ENABLED\" if HYPERLIQUID_PRIVATE_KEY else \"DISABLED (no key)\"}'
 )"""))
 
+# ── Step 4b: Local zip upload (alternative for users behind firewall) ────────────
+cells.append(md("""## Step 4 (Alternative) — Upload Local Data Zip
+
+> **Use this step instead of Step 4 if you are behind the Great Firewall or cannot reach Binance Vision.**
+> If you can download from Binance Vision directly, **skip this step** and run Step 4 instead.
+
+### How to get the data zip
+
+**Option A — Download from Binance Vision manually (recommended for 5 years)**
+1. Go to: `https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/`
+2. Download each monthly `.zip` file (e.g. `BTCUSDT-1m-2025-06.zip`, ~2 MB each)
+3. Bundle them into one zip: select all files → right-click → compress
+4. Upload the bundle zip to Colab (see below)
+
+**Option B — Use the pre-packaged 1-year zip (Jun 2025 – May 2026)**
+Download from the GitHub releases page or from the project maintainer.
+File: `BTCUSDT_1m_2025-06_to_2026-05.zip` (~25 MB, 12 months)
+
+### How to upload to Colab
+1. In the left sidebar, click the **Files** icon (folder)
+2. Click **Upload** (up-arrow icon)
+3. Select your zip file
+4. Wait for upload to complete, then run this cell"""))
+cells.append(code("""import os, sys, zipfile, shutil, time
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+RAW_DIR = Path('/content/AIQuant/data/raw')
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+COLS = ['open_time','open','high','low','close','volume',
+        'close_time','quote_vol','n_trades','taker_buy_base','taker_buy_quote','ignore']
+
+# ── Find uploaded zip ─────────────────────────────────────────────────────────
+# Search common upload locations: /content/, /root/, home dir
+search_dirs = [Path('/content'), Path('/root'), Path.home()]
+zip_files = []
+for d in search_dirs:
+    zip_files += list(d.glob('BTCUSDT*.zip')) + list(d.glob('btcusdt*.zip'))
+
+if not zip_files:
+    print('⚠  No BTCUSDT zip found in /content/ or /root/')
+    print('   Please upload your zip file using the Files panel (left sidebar → Upload)')
+    print('   Expected filename pattern: BTCUSDT*.zip')
+else:
+    zip_path = zip_files[0]
+    print(f'Found: {zip_path}  ({zip_path.stat().st_size/1e6:.1f} MB)')
+    print(f'Extracting to {RAW_DIR}...')
+    t0 = time.time()
+    with zipfile.ZipFile(zip_path) as z:
+        members = z.namelist()
+        csv_members = [m for m in members if m.endswith('.csv') and 'BTCUSDT-1m-' in m]
+        zip_members = [m for m in members if m.endswith('.zip') and 'BTCUSDT-1m-' in m]
+        print(f'  Contents: {len(csv_members)} CSV files, {len(zip_members)} zip files')
+        for m in members:
+            z.extract(m, RAW_DIR)
+            # If inner zips exist, extract them too
+            inner = RAW_DIR / m
+            if str(inner).endswith('.zip'):
+                with zipfile.ZipFile(inner) as iz:
+                    iz.extractall(RAW_DIR)
+                inner.unlink()
+    print(f'  Extracted in {time.time()-t0:.1f}s')
+
+    # Show what we have
+    csv_files = sorted(RAW_DIR.glob('BTCUSDT-1m-????-??.csv'))
+    print(f'\n  Monthly CSV files found: {len(csv_files)}')
+    for f in csv_files:
+        print(f'    ✓ {f.name}  ({f.stat().st_size/1e6:.1f} MB)')
+
+    # Build combined parquet
+    print('\nBuilding combined parquet...')
+    dfs = []
+    for f in csv_files:
+        df = pd.read_csv(f, header=None, names=COLS, dtype=str)
+        ts = df['open_time'].astype(np.int64)
+        if ts.iloc[0] > 1_000_000_000_000_000:
+            ts = ts // 1000
+        df.index = pd.to_datetime(ts, unit='ms', utc=True)
+        df.index.name = 'open_time'
+        for col in ['open','high','low','close','volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        dfs.append(df[['open','high','low','close','volume']])
+
+    # Also try to fetch Hyperliquid bridge (last 7 days) — skip if blocked
+    try:
+        import requests as _req, time as _time
+        url = 'https://api.hyperliquid.xyz/info'
+        now_ms   = int(_time.time() * 1000)
+        start_ms = now_ms - 7 * 24 * 60 * 60 * 1000
+        r = _req.post(url, json={'type': 'candleSnapshot',
+            'req': {'coin': 'BTC', 'interval': '1m', 'startTime': start_ms, 'endTime': now_ms}},
+            timeout=15)
+        bars = r.json()
+        if bars:
+            rows = [{'open': float(b.get('o',0)), 'high': float(b.get('h',0)),
+                     'low': float(b.get('l',0)), 'close': float(b.get('c',0)),
+                     'volume': float(b.get('v',0)), 'open_time': int(b.get('t', b.get('T',0)))}
+                    for b in bars]
+            hl_df = pd.DataFrame(rows)
+            hl_df.index = pd.to_datetime(hl_df['open_time'], unit='ms', utc=True)
+            hl_df.index.name = 'open_time'
+            hl_df = hl_df[['open','high','low','close','volume']]
+            hl_df.to_parquet(RAW_DIR / 'BTC_1m_hl.parquet')
+            dfs.append(hl_df)
+            print(f'  ✓ Hyperliquid bridge: {len(hl_df):,} bars (last 7 days)')
+    except Exception as e:
+        print(f'  ⚠ Hyperliquid bridge skipped ({e}) — using CSV data only')
+
+    combined = pd.concat(dfs).sort_index()
+    combined = combined[~combined.index.duplicated(keep='last')].dropna()
+    combined = combined[combined['close'] > 0]
+    out = RAW_DIR / 'BTCUSDT_1m_full.parquet'
+    combined.to_parquet(out)
+    print(f'\n✓ Dataset ready')
+    print(f'  Bars  : {len(combined):,}')
+    print(f'  Range : {combined.index[0].date()} → {combined.index[-1].date()}')
+    print(f'  Price : ${combined["close"].min():,.0f} → ${combined["close"].max():,.0f}')
+    print(f'  Size  : {out.stat().st_size/1e6:.1f} MB')
+    print('\n✓ You can now skip Step 4 and proceed directly to Step 5.')"""))
+
 # ── Step 4: Download Binance Vision data ──────────────────────────────────────
-cells.append(md("""## Step 4 — Download Binance Vision Dataset
+cells.append(md("""## Step 4 — Download Binance Vision Dataset (Auto-Download)
 
 Downloads the required monthly BTCUSDT 1-minute OHLCV files from Binance Vision (free, no API key).
 The number of files is **automatically calculated from the `DAYS` setting in Step 3** —
