@@ -48,6 +48,22 @@ cd AIQuant
 pip install -r requirements.txt
 ```
 
+### Data Setup
+
+Place yearly zip files (provided or downloaded from [Binance Vision](https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/)) into the `data/` folder, then run:
+
+```bash
+# Auto-detects local zips in data/ and extracts them.
+# If no zips are found, downloads from Binance Vision automatically.
+# Also fetches the last 7 days from Hyperliquid to bridge the gap to today.
+python3 scripts/prepare_data.py
+
+# Custom window (default is 1825 = 5 years)
+python3 scripts/prepare_data.py --days 365
+```
+
+Accepted zip filenames: `BTCUSDT_1m_2021.zip`, `21.zip`, or any `*.zip` containing `BTCUSDT-1m-YYYY-MM.csv` files.
+
 ### CLI Usage
 
 ```bash
