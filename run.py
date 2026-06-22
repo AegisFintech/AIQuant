@@ -122,28 +122,19 @@ def normalise_pair(raw: str) -> str:
 
 def load_data(pair: str = 'BTCUSDT', days: int = 1825) -> pd.DataFrame:
     """
-    Load 1m OHLCV data from the pre-built parquet dataset.
-    If the parquet doesn't exist, runs prepare_data.py to build it.
+    Load 1m OHLCV data. Automatically prepares data if missing or stale.
     """
-    parquet_path = DATA_DIR / 'BTCUSDT_1m_full.parquet'
+    from aiquant.data.preparer import ensure_data_prepared, OUT_PATH
+    
+    # Unified data preparation flow
+    ensure_data_prepared(days=days, verbose=True)
 
-    if not parquet_path.exists():
-        print(f"  {YELLOW('⚠')}  Dataset not found. Building from Binance Vision CSVs...")
-        import subprocess
-        result = subprocess.run(
-            [sys.executable, str(ROOT / 'scripts' / 'prepare_data.py')],
-            capture_output=False
-        )
-        if result.returncode != 0:
-            raise RuntimeError("prepare_data.py failed. Check data/raw/ for CSV files.")
-
-    print(f"  {CYAN('↓')} Loading dataset from {parquet_path.name}...", end=' ', flush=True)
-    df = pd.read_parquet(parquet_path)
+    print(f"  {CYAN('↓')} Loading dataset from {OUT_PATH.name}...", end=' ', flush=True)
+    df = pd.read_parquet(OUT_PATH)
 
     # Trim to requested window
-    if days < 1825:
-        cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=days)
-        df = df[df.index >= cutoff]
+    cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=days + 1)
+    df = df[df.index >= cutoff]
 
     print(f"{GREEN('✓')}")
     print(f"  {DIM(f'{len(df):,} bars  ·  {df.index[0].date()} → {df.index[-1].date()}')}")
