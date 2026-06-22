@@ -62,7 +62,7 @@ print('\\n✓ Repository ready')"""))
 # ── Step 2: Install + GPU check ───────────────────────────────────────────────
 cells.append(md("## Step 2 — Install Dependencies & Verify GPU"))
 cells.append(code("""!pip install -q -r requirements.txt
-!pip install -q cupy-cuda12x xgboost lightgbm torch ta numba pyarrow statsmodels scikit-learn python-dotenv python-dateutil
+!pip install -q cupy-cuda12x xgboost lightgbm torch ta numba pyarrow statsmodels scikit-learn python-dotenv python-dateutil jupyter-server==2.18.2
 
 print('\\n' + '='*60)
 print('  GPU & Library Verification')
